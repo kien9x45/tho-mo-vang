@@ -87,15 +87,27 @@ async function telegramApi(method, payload) {
 
 async function sendWelcome(chatId, startPayload) {
   const gameUrl = startPayload ? GAME_URL + '/?startapp=' + encodeURIComponent(startPayload) : GAME_URL;
+  const replyMarkup = {
+    inline_keyboard: [
+      [{ text: '⛏ Chơi Game', web_app: { url: gameUrl } }],
+      [{ text: '📣 Kênh nhận mã quà', url: 'https://t.me/ThoMoVangOfficial' }],
+    ],
+  };
+  // Gửi kèm ảnh banner (file banner-welcome.jpg nằm trong public/ của chính
+  // server này, Telegram tự tải qua URL) + nội dung chào làm caption. Nếu gửi
+  // ảnh lỗi (Telegram không tải được ảnh...) thì lùi về gửi tin chữ như cũ để
+  // người chơi luôn nhận được lời chào.
+  const photo = await telegramApi('sendPhoto', {
+    chat_id: chatId,
+    photo: GAME_URL + '/banner-welcome.jpg',
+    caption: WELCOME_TEXT,
+    reply_markup: replyMarkup,
+  });
+  if (photo && photo.ok) return;
   await telegramApi('sendMessage', {
     chat_id: chatId,
     text: WELCOME_TEXT,
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '⛏ Chơi Game', web_app: { url: gameUrl } }],
-        [{ text: '📣 Kênh nhận mã quà', url: 'https://t.me/ThoMoVangOfficial' }],
-      ],
-    },
+    reply_markup: replyMarkup,
   });
 }
 
