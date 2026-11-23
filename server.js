@@ -245,6 +245,33 @@ function payRefMilestoneIfDue(save) {
   save.refMilestoneDone = true;
   return true;
 }
+/* ---- Rút tiền: chuẩn hoá bản ghi khi trả ra API ----
+ * Đơn cũ lưu status "Chờ xử lý" (tiếng Việt) và account/name; đơn mới lưu status
+ * mã 'pending' và thêm accountNumber/accountName/processedAt. Khi trả ra API
+ * quy tất cả về một dạng thống nhất: status 'pending' | 'paid' | 'rejected',
+ * accountNumber/accountName luôn có, processedAt null khi chưa xử lý. */
+function withdrawalStatusOf(w) {
+  if (w.status === 'paid' || w.status === 'rejected') return w.status;
+  return 'pending'; // cả 'pending' (mới) lẫn 'Chờ xử lý' (cũ) đều là chưa xử lý
+}
+function publicWithdrawal(w) {
+  return {
+    id: w.id,
+    playerId: w.playerId,
+    method: w.method || 'bank',
+    bank: w.bank,
+    account: w.account,
+    name: w.name,
+    accountNumber: w.accountNumber || w.account || '',
+    accountName: w.accountName || w.name || '',
+    gold: w.gold,
+    vnd: w.vnd,
+    status: withdrawalStatusOf(w),
+    createdAt: w.createdAt,
+    processedAt: w.processedAt || null,
+  };
+}
+
 // Tính vàng offline: chỉ trong thời gian phiên còn hiệu lực, tối đa 8 giờ, 25% tốc độ thường
 function applyOffline(save, now) {
   const last = save.lastSeen || now;
@@ -456,24 +483,63 @@ const server = http.createServer(async (req, res) => {
         id: crypto.randomBytes(6).toString('hex'),
         playerId: save.playerId,
         method: method || 'bank',
-        bank, account, name, gold,
+        bank, account, name,
+        accountNumber: account, accountName: name,
+        gold,
         vnd: Math.floor(gold * WITHDRAW_RATE),
-        status: 'Chờ xử lý',
+        status: 'pending',
         createdAt: now,
+        processedAt: null,
       };
       data.withdrawals.push(wd);
       save._clientGold = save.gold; save._clientGems = save.gems; // client nhận số dư này trong đáp
       save._lastSync = now; save.lastSeen = now;
       await persist();
-      return sendJson(res, 200, { save, withdrawal: wd });
+      return sendJson(res, 200, { save, withdrawal: publicWithdrawal(wd) });
     }
 
     /* ---- GET /api/withdrawals : của 1 người chơi, hoặc tất cả nếu là owner ---- */
     if (req.method === 'GET' && url.pathname === '/api/withdrawals') {
-      if (isOwner(req)) return sendJson(res, 200, { withdrawals: data.withdrawals });
+      if (isOwner(req)) {
+        // Chủ game: toàn bộ đơn, mới nhất trước, đủ trường để hiển thị + đối soát
+        const all = data.withdrawals.map(publicWithdrawal).sort((a, b) => b.createdAt - a.createdAt);
+        return sendJson(res, 200, { withdrawals: all });
+      }
       const playerId = url.searchParams.get('playerId');
-      if (!playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
-      return sendJson(res, 200, { withdrawals: data.withdrawals.filter((w) => w.playerId === String(playerId)) });
+      // Không có playerId nghĩa là đang đòi xem TOÀN BỘ đơn — việc đó chỉ dành
+      // cho chủ game (đã xử lý ở nhánh owner phía trên) nên trả 401.
+      if (!playerId) return sendJson(res, 401, { error: 'Thiếu playerId (xem toàn bộ đơn cần mã chủ game)' });
+      return sendJson(res, 200, { withdrawals: data.withdrawals.filter((w) => w.playerId === String(playerId)).map(publicWithdrawal) });
+    }
+
+    /* ---- POST /api/withdrawals/update (owner) {id, action: "paid" | "rejected"} ----
+     * Chủ game xử lý đơn rút: "paid" = đã chuyển khoản xong; "rejected" = từ chối
+     * và HOÀN LẠI đúng số vàng của đơn vào số dư người chơi. Chỉ xử lý được đơn
+     * đang chờ (pending); đơn đã xử lý rồi thì báo lỗi rõ ràng. */
+    if (req.method === 'POST' && url.pathname === '/api/withdrawals/update') {
+      if (!isOwner(req)) return sendJson(res, 401, { error: 'Sai mã chủ game (header x-owner-key)' });
+      const body = await readBody(req);
+      const id = String(body.id || '');
+      const action = String(body.action || '');
+      if (action !== 'paid' && action !== 'rejected') {
+        return sendJson(res, 400, { error: 'Hành động không hợp lệ (chỉ "paid" hoặc "rejected")' });
+      }
+      const wd = data.withdrawals.find((w) => String(w.id) === id);
+      if (!wd) return sendJson(res, 404, { error: 'Không tìm thấy đơn rút tiền' });
+      if (withdrawalStatusOf(wd) !== 'pending') {
+        return sendJson(res, 400, { error: 'Đơn này đã được xử lý rồi' });
+      }
+      wd.status = action;
+      wd.processedAt = now;
+      if (action === 'rejected') {
+        // Cộng thẳng vào bản ghi server của người chơi. KHÔNG đụng _clientGold:
+        // cơ chế gộp delta ở POST /api/save sẽ giữ khoản hoàn này cho họ kể cả
+        // khi một save cũ của họ đến trễ sau lúc từ chối.
+        const player = data.players[wd.playerId];
+        if (player) player.gold += wd.gold;
+      }
+      await persist();
+      return sendJson(res, 200, { ok: true, withdrawal: publicWithdrawal(wd) });
     }
 
     /* ---- POST /api/referral {playerId, code} ----
