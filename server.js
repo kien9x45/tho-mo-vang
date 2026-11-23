@@ -30,7 +30,10 @@ const WITHDRAW_MIN_GOLD = 4000000;  // tối thiểu 4.000.000 vàng
 const SESSION_SECONDS = 4 * 3600;   // phiên đào 4 giờ
 const OFFLINE_CAP_SECONDS = 8 * 3600;
 const OFFLINE_RATE = 0.25;          // offline = 25% tốc độ thường
-const REFERRAL_REWARD = { gold: 20000, gems: 100 }; // quà cho người nhập mã bạn bè
+const REFERRAL_REWARD = { gold: 20000, gems: 100 }; // quà NGAY cho người được mời khi ghi nhận ref
+const REFERRAL_INVITER_REWARD = { gold: 2000, gems: 10 }; // quà NGAY cho người mời khi bạn mới ghi nhận ref
+const REFERRAL_MILESTONE_EARNED = 100000; // mốc tổng đào tích lũy (totalEarned) của người được mời
+const REFERRAL_MILESTONE_REWARD = { gold: 18000, gems: 90 }; // quà MỐC cho người mời, đúng 1 lần cho mỗi người được mời
 const MILESTONES = [
   { count: 1, gold: 50000, gems: 200 },
   { count: 3, gold: 150000, gems: 500 },
@@ -196,6 +199,7 @@ function newSave(playerId, now) {
     createdAt: now,
     referralCode: makeReferralCode(playerId),
     referredBy: null,
+    refMilestoneDone: false, // đã trả thưởng mốc cho người giới thiệu nhờ player này chưa
     friendsCount: 0,
     milestonesPaid: [],
     lastCheckin: null,      // 'YYYY-MM-DD'
@@ -212,6 +216,34 @@ function getOrCreatePlayer(playerId, now) {
     data.players[playerId] = newSave(playerId, now);
   }
   return data.players[playerId];
+}
+/* ---- Giới thiệu bạn bè: server là nguồn sự thật ---- */
+// Số bạn bè THẬT của 1 người chơi = số player có referredBy là mình (đếm từ state,
+// không tin con số friendsCount lưu sẵn — tránh số mô phỏng/farm từ bản cũ).
+function friendsCountOf(playerId) {
+  let n = 0;
+  for (const p of Object.values(data.players)) if (p.referredBy === playerId) n++;
+  return n;
+}
+// Mã giới thiệu của người đã mời player này (để client hiển thị), null nếu chưa có.
+function referredByCodeOf(save) {
+  if (!save.referredBy) return null;
+  const inviter = data.players[save.referredBy];
+  return inviter ? inviter.referralCode : null;
+}
+// Trả phần thưởng MỐC cho người giới thiệu khi người được mời đào tích lũy đủ mốc.
+// Đúng 1 lần cho mỗi người được mời (cờ refMilestoneDone); người giới thiệu offline
+// vẫn được cộng thẳng vào bản ghi của họ, lần sau mở game sẽ thấy.
+function payRefMilestoneIfDue(save) {
+  if (!save.referredBy || save.refMilestoneDone) return false;
+  if ((save.totalEarned || 0) < REFERRAL_MILESTONE_EARNED) return false;
+  const inviter = data.players[save.referredBy];
+  if (!inviter || inviter.playerId === save.playerId) return false;
+  inviter.gold += REFERRAL_MILESTONE_REWARD.gold;
+  inviter.gems += REFERRAL_MILESTONE_REWARD.gems;
+  inviter.friendsCount = friendsCountOf(inviter.playerId);
+  save.refMilestoneDone = true;
+  return true;
 }
 // Tính vàng offline: chỉ trong thời gian phiên còn hiệu lực, tối đa 8 giờ, 25% tốc độ thường
 function applyOffline(save, now) {
@@ -268,8 +300,13 @@ const server = http.createServer(async (req, res) => {
       if (!playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
       const save = getOrCreatePlayer(String(playerId), now);
       const offlineEarned = applyOffline(save, now);
+      payRefMilestoneIfDue(save); // vàng offline cũng tính vào tổng đào tích lũy
+      save.friendsCount = friendsCountOf(save.playerId);
+      // Client nhận đúng số dư này khi tải game -> mốc báo cáo của client = server
+      save._clientGold = save.gold;
+      save._clientGems = save.gems;
       await persist();
-      return sendJson(res, 200, { save, offlineEarned, miners: MINERS, milestones: MILESTONES });
+      return sendJson(res, 200, { save, offlineEarned, miners: MINERS, milestones: MILESTONES, referredByCode: referredByCodeOf(save) });
     }
 
     /* ---- POST /api/save ---- */
@@ -292,10 +329,32 @@ const server = http.createServer(async (req, res) => {
       const dtSec = Math.max(1, (now - (save._lastSync || save.lastSeen || now)) / 1000);
       const maxGoldGain = gpsOf(save) * dtSec * 2 + 200000;
       const maxGemsGain = 20000;
-      if (inc.gold !== undefined && inc.gold > save.gold + maxGoldGain) inc.gold = Math.floor(save.gold + maxGoldGain);
-      if (inc.gems !== undefined && inc.gems > save.gems + maxGemsGain) inc.gems = Math.floor(save.gems + maxGemsGain);
+      // Vàng/KC gộp theo DELTA thay vì ghi đè tuyệt đối: các khoản server tự cộng
+      // (thưởng giới thiệu/mốc bạn bè, đổi mã quà...) nằm trong số dư server nhưng
+      // client chưa biết — ghi đè tuyệt đối sẽ xoá mất chúng ở lần save sau.
+      // Mốc tính delta do CLIENT gửi kèm (baseGold/baseGems = số dư server gần
+      // nhất client đã nhận): delta khi đó chỉ gồm phần client tự kiếm/tiêu kể từ
+      // mốc của chính nó, nên save cũ đến trễ sau một khoản server cộng cũng không
+      // xoá được khoản cộng đó, bất kể thứ tự xử lý. Thiếu mốc (bundle cũ) thì
+      // dùng _clientGold phía server làm mốc dự phòng.
+      if (inc.gold !== undefined) {
+        const base = Number.isFinite(inc.baseGold) ? inc.baseGold
+          : (Number.isFinite(save._clientGold) ? save._clientGold : save.gold);
+        let delta = inc.gold - base;
+        if (delta > maxGoldGain) delta = Math.floor(maxGoldGain);
+        save.gold = Math.max(0, Math.floor(save.gold + delta));
+        save._clientGold = save.gold;
+      }
+      if (inc.gems !== undefined) {
+        const base = Number.isFinite(inc.baseGems) ? inc.baseGems
+          : (Number.isFinite(save._clientGems) ? save._clientGems : save.gems);
+        let delta = inc.gems - base;
+        if (delta > maxGemsGain) delta = Math.floor(maxGemsGain);
+        save.gems = Math.max(0, Math.floor(save.gems + delta));
+        save._clientGems = save.gems;
+      }
 
-      const keep = ['gold', 'gems', 'minerLevel', 'tapPower', 'totalEarned', 'totalTaps',
+      const keep = ['minerLevel', 'tapPower', 'totalEarned', 'totalTaps',
         'lastCheckin', 'checkinStreak', 'tasks', 'achievementsClaimed'];
       for (const f of keep) if (inc[f] !== undefined) save[f] = inc[f];
       if (inc.miners && typeof inc.miners === 'object') {
@@ -310,10 +369,12 @@ const server = http.createServer(async (req, res) => {
         // phiên tối đa 4 giờ kể từ hiện tại (cộng thêm độ trễ nhỏ)
         save.sessionEnd = Math.min(inc.sessionEnd, now + SESSION_SECONDS * 1000 + 60000);
       }
+      payRefMilestoneIfDue(save);
+      save.friendsCount = friendsCountOf(save.playerId);
       save._lastSync = now;
       save.lastSeen = now;
       await persist();
-      return sendJson(res, 200, { save });
+      return sendJson(res, 200, { save, referredByCode: referredByCodeOf(save) });
     }
 
     /* ---- POST /api/exchange {playerId, goldAmount} : vàng -> KC, 125:1, một chiều ---- */
@@ -330,6 +391,7 @@ const server = http.createServer(async (req, res) => {
       if (save.gold < cost) return sendJson(res, 400, { error: 'Không đủ vàng để đổi' });
       save.gold -= cost;
       save.gems += gems;
+      save._clientGold = save.gold; save._clientGems = save.gems; // client nhận số dư này trong đáp
       save._lastSync = now; save.lastSeen = now;
       await persist();
       return sendJson(res, 200, { save, exchanged: { gold: cost, gems } });
@@ -349,6 +411,7 @@ const server = http.createServer(async (req, res) => {
       data.redemptions[save.playerId] = used;
       save.gold += gift.gold || 0;
       save.gems += gift.gems || 0;
+      save._clientGold = save.gold; save._clientGems = save.gems; // client nhận số dư này trong đáp
       save._lastSync = now; save.lastSeen = now;
       await persist();
       return sendJson(res, 200, { save, reward: { gold: gift.gold || 0, gems: gift.gems || 0 } });
@@ -399,6 +462,7 @@ const server = http.createServer(async (req, res) => {
         createdAt: now,
       };
       data.withdrawals.push(wd);
+      save._clientGold = save.gold; save._clientGems = save.gems; // client nhận số dư này trong đáp
       save._lastSync = now; save.lastSeen = now;
       await persist();
       return sendJson(res, 200, { save, withdrawal: wd });
@@ -412,31 +476,48 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { withdrawals: data.withdrawals.filter((w) => w.playerId === String(playerId)) });
     }
 
-    /* ---- POST /api/referral {playerId, code} ---- */
+    /* ---- POST /api/referral {playerId, code} ----
+     * Cơ chế giới thiệu THẬT do server kiểm tra (chống farm), thưởng chia 2 phần:
+     * - Ghi nhận: mã phải tồn tại; không tự giới thiệu mình; mỗi người chỉ có 1 người
+     *   giới thiệu; chỉ ghi nhận khi tài khoản còn "mới" (tổng đào tích lũy < mốc).
+     * - Ngay khi ghi nhận: người được mời +20.000 vàng/+100 KC, người mời +2.000/+10.
+     * - Phần lớn trả sau: người mời +18.000 vàng/+90 KC khi người được mời đào tích
+     *   lũy đủ 100.000 vàng (xem payRefMilestoneIfDue, đúng 1 lần/người được mời).
+     * Mốc bạn bè theo SỐ NGƯỜI (MILESTONES cũ) không còn tự trả ở đây — tab Bạn bè
+     * phía client nhận thưởng theo refCount thật qua luồng nhiệm vụ sẵn có. */
     if (req.method === 'POST' && url.pathname === '/api/referral') {
       const body = await readBody(req);
       if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
       const me = getOrCreatePlayer(String(body.playerId), now);
       const code = String(body.code || '').trim().toUpperCase();
-      if (me.referredBy) return sendJson(res, 400, { error: 'Bạn đã nhập mã bạn bè rồi' });
-      if (code === me.referralCode) return sendJson(res, 400, { error: 'Không thể nhập mã của chính mình' });
+      if (!code) return sendJson(res, 400, { error: 'Hãy nhập mã giới thiệu của bạn bè' });
+      if (me.referredBy) return sendJson(res, 400, { error: 'Bạn đã có người giới thiệu rồi' });
+      if (code === me.referralCode) return sendJson(res, 400, { error: 'Không thể tự giới thiệu mình' });
       const inviter = Object.values(data.players).find((p) => p.referralCode === code);
-      if (!inviter) return sendJson(res, 404, { error: 'Mã bạn bè không tồn tại' });
+      if (!inviter) return sendJson(res, 404, { error: 'Mã giới thiệu không tồn tại' });
+      if ((me.totalEarned || 0) >= REFERRAL_MILESTONE_EARNED) {
+        return sendJson(res, 400, { error: 'Tài khoản đã chơi lâu, không nhập mã giới thiệu được nữa' });
+      }
       me.referredBy = inviter.playerId;
+      me.refMilestoneDone = false;
       me.gold += REFERRAL_REWARD.gold;
       me.gems += REFERRAL_REWARD.gems;
-      inviter.friendsCount = (inviter.friendsCount || 0) + 1;
-      inviter.milestonesPaid = inviter.milestonesPaid || [];
-      for (const ms of MILESTONES) {
-        if (inviter.friendsCount >= ms.count && !inviter.milestonesPaid.includes(ms.count)) {
-          inviter.milestonesPaid.push(ms.count);
-          inviter.gold += ms.gold;
-          inviter.gems += ms.gems;
-        }
-      }
+      inviter.gold += REFERRAL_INVITER_REWARD.gold;
+      inviter.gems += REFERRAL_INVITER_REWARD.gems;
+      inviter.friendsCount = friendsCountOf(inviter.playerId);
+      // KHÔNG đụng _clientGold/_clientGems của người mời: client của họ chưa biết
+      // khoản cộng này, cơ chế gộp delta ở POST /api/save sẽ giữ nó cho họ.
+      me.friendsCount = friendsCountOf(me.playerId);
+      payRefMilestoneIfDue(me);
+      me._clientGold = me.gold; me._clientGems = me.gems; // người được mời nhận số dư này trong đáp
       me._lastSync = now; me.lastSeen = now;
       await persist();
-      return sendJson(res, 200, { save: me, reward: REFERRAL_REWARD });
+      return sendJson(res, 200, {
+        save: me,
+        reward: REFERRAL_REWARD,
+        inviterReward: REFERRAL_INVITER_REWARD,
+        referredByCode: inviter.referralCode,
+      });
     }
 
     /* ---- File tĩnh ---- */
