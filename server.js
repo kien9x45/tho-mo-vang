@@ -225,6 +225,12 @@ function friendsCountOf(playerId) {
   for (const p of Object.values(data.players)) if (p.referredBy === playerId) n++;
   return n;
 }
+// Số lượt một mã quà đã được nhập thành công (đếm trên toàn bộ người chơi).
+function giftUsedCountOf(code) {
+  let n = 0;
+  for (const codes of Object.values(data.redemptions)) if (Array.isArray(codes) && codes.includes(code)) n++;
+  return n;
+}
 // Mã giới thiệu của người đã mời player này (để client hiển thị), null nếu chưa có.
 function referredByCodeOf(save) {
   if (!save.referredBy) return null;
@@ -434,6 +440,13 @@ const server = http.createServer(async (req, res) => {
       if (!gift) return sendJson(res, 404, { error: 'Mã quà tặng không tồn tại' });
       const used = data.redemptions[save.playerId] || [];
       if (used.includes(code)) return sendJson(res, 400, { error: 'Bạn đã dùng mã này rồi (mỗi mã chỉ dùng 1 lần)' });
+      // Giới hạn tổng số lượt nhập (maxUses = null -> không giới hạn; mã cũ không
+      // có trường này cũng là không giới hạn). Kiểm tra và ghi nhận diễn ra đồng
+      // bộ trong cùng một lần xử lý nên 2 người nhập đồng thời không vượt giới hạn.
+      const maxUses = gift.maxUses == null ? null : gift.maxUses;
+      if (maxUses != null && giftUsedCountOf(code) >= maxUses) {
+        return sendJson(res, 400, { error: 'Mã quà đã hết lượt nhập rồi' });
+      }
       used.push(code);
       data.redemptions[save.playerId] = used;
       save.gold += gift.gold || 0;
@@ -453,12 +466,31 @@ const server = http.createServer(async (req, res) => {
         if (!code) return sendJson(res, 400, { error: 'Thiếu mã code' });
         const gold = Math.max(0, Math.floor(body.gold || 0));
         const gems = Math.max(0, Math.floor(body.gems || 0));
-        data.giftCodes[code] = { gold, gems, createdAt: now };
+        // maxUses tuỳ chọn: không gửi / null / rỗng -> null (không giới hạn).
+        let maxUses = null;
+        if (body.maxUses !== undefined && body.maxUses !== null && body.maxUses !== '') {
+          const n = Number(body.maxUses);
+          if (!Number.isInteger(n) || n < 1 || n > 1000000) {
+            return sendJson(res, 400, { error: 'Số lượt nhập tối đa phải là số nguyên từ 1 đến 1.000.000 (hoặc để trống nếu không giới hạn)' });
+          }
+          maxUses = n;
+        }
+        data.giftCodes[code] = { gold, gems, createdAt: now, maxUses };
         await persist();
-        return sendJson(res, 200, { ok: true, code, gold, gems });
+        return sendJson(res, 200, { ok: true, code, gold, gems, maxUses });
       }
       if (req.method === 'GET') {
-        return sendJson(res, 200, { giftCodes: data.giftCodes });
+        const giftCodes = {};
+        for (const [code, g] of Object.entries(data.giftCodes)) {
+          giftCodes[code] = {
+            gold: g.gold || 0,
+            gems: g.gems || 0,
+            createdAt: g.createdAt || 0,
+            maxUses: g.maxUses == null ? null : g.maxUses,
+            usedCount: giftUsedCountOf(code),
+          };
+        }
+        return sendJson(res, 200, { giftCodes });
       }
     }
 
