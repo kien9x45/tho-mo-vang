@@ -444,10 +444,17 @@ const server = http.createServer(async (req, res) => {
       let filePath = url.pathname === '/' ? '/index.html' : url.pathname;
       filePath = path.normalize(path.join(PUBLIC_DIR, filePath));
       if (!filePath.startsWith(PUBLIC_DIR)) { res.writeHead(403); return res.end('Forbidden'); }
-      fs.readFile(filePath, (err, buf) => {
-        if (err) { res.writeHead(404); return res.end('Not found'); }
-        res.writeHead(200, { 'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream' });
-        res.end(buf);
+      fs.stat(filePath, (err, st) => {
+        if (err || !st.isFile()) { res.writeHead(404); return res.end('Not found'); }
+        // Chống cache cũ: trình duyệt luôn hỏi lại server (ETag) — file chưa đổi
+        // thì trả 304 (rất nhẹ), file đã đổi (deploy mới) thì nhận ngay bản mới.
+        const etag = 'W/"' + st.size + '-' + Math.floor(st.mtimeMs) + '"';
+        if (req.headers['if-none-match'] === etag) { res.writeHead(304); return res.end(); }
+        fs.readFile(filePath, (err2, buf) => {
+          if (err2) { res.writeHead(404); return res.end('Not found'); }
+          res.writeHead(200, { 'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream', 'Cache-Control': 'no-cache', 'ETag': etag });
+          res.end(buf);
+        });
       });
       return;
     }
