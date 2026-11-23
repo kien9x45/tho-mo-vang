@@ -1,0 +1,1 @@
+{"description":"Thợ Mỏ Vàng — game đào vàng idle (bản deploy độc lập, server Node.js không thư viện ngoài)","engines":{"node":">=18"},"license":"UNLICENSED","main":"server.js","name":"tho-mo-vang","private":true,"scripts":{"start":"node server.js"},"version":"1.0.0"}
