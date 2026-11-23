@@ -1,8 +1,13 @@
 # Thợ Mỏ Vàng — Bản deploy độc lập (Game Đào Vàng Idle)
 
 Bản đóng gói độc lập của game đào vàng idle, gồm 1 server Node.js **không dùng thư viện ngoài**
-(chỉ `node:http`, `node:fs`, `node:crypto`) + 1 trang client duy nhất. Dữ liệu lưu trong
-`data.json` cùng thư mục server (ghi an toàn qua file tạm + rename).
+(chỉ `node:http`, `node:fs`, `node:crypto` + `fetch` có sẵn) + 1 trang client duy nhất.
+Dữ liệu có 2 chế độ lưu:
+
+- **Có biến môi trường `DATABASE_URL`** → lưu vào **Neon Postgres** (bảng `game_state`, qua
+  Neon HTTP API) — dùng khi deploy lên host miễn phí có đĩa tạm thời như Render Free.
+- **Không có `DATABASE_URL`** → lưu trong `data.json` cùng thư mục server (ghi an toàn qua
+  file tạm + rename) — dùng khi chạy local/VPS có đĩa bền.
 
 ## Cấu trúc
 
@@ -11,7 +16,7 @@ tho-mo-vang/
 ├── server.js          # Server API + phục vụ file tĩnh
 ├── public/
 │   └── index.html     # Toàn bộ giao diện game (tiếng Việt, mỏ 3D three.js + fallback 2D)
-├── data.json          # Dữ liệu người chơi (tự tạo khi chạy lần đầu)
+├── data.json          # Dữ liệu người chơi ở chế độ file (tự tạo khi chạy lần đầu; chế độ Neon thì lưu trong Postgres)
 ├── package.json
 └── README.md
 ```
@@ -28,23 +33,48 @@ node server.js
 
 ## Biến môi trường
 
-| Biến        | Mặc định       | Ý nghĩa |
-|-------------|----------------|---------|
-| `PORT`      | `3000`         | Cổng server lắng nghe (hầu hết các host tự cấp biến này). |
-| `OWNER_KEY` | `thomovang123` | Mã chủ game — dùng để tạo mã quà tặng (khu "Chủ game — Tạo mã quà tặng" trong tab Nâng Cấp) và xem danh sách yêu cầu rút tiền qua API. **Khi deploy thật PHẢI đổi** thành một mã bí mật riêng, ví dụ: `OWNER_KEY=ma-bi-mat-cua-ban node server.js` |
+| Biến            | Mặc định       | Ý nghĩa |
+|-----------------|----------------|---------|
+| `PORT`          | `3000`         | Cổng server lắng nghe (hầu hết các host tự cấp biến này). |
+| `OWNER_KEY`     | `thomovang123` | Mã chủ game — dùng để tạo mã quà tặng (khu "Chủ game — Tạo mã quà tặng" trong tab Nâng Cấp) và xem danh sách yêu cầu rút tiền qua API. **Khi deploy thật PHẢI đổi** thành một mã bí mật riêng, ví dụ: `OWNER_KEY=ma-bi-mat-cua-ban node server.js` |
+| `DATABASE_URL`  | _(trống)_      | Connection string của Neon Postgres. Nếu được đặt, server lưu dữ liệu vào Neon thay cho file `data.json` (log khởi động sẽ in `storage: neon`; không đặt thì in `storage: file`). Lấy ở Neon Console → **Connect** (chọn bản **pooled**). Không bao giờ commit giá trị này vào code/git. |
+| `NEON_HTTP_BASE`| _(trống)_      | **Không bắt buộc, chỉ để test local** với mock server mô phỏng Neon HTTP API, ví dụ `NEON_HTTP_BASE=http://localhost:4517`. Khi dùng Neon thật thì KHÔNG đặt biến này. |
 
-## Deploy lên host công khai (để lấy link HTTPS cho BotFather)
+## Deploy Render Free + Neon (khuyên dùng — miễn phí, không mất dữ liệu)
+
+Render Free có 2 đặc điểm cần biết:
+
+1. **Filesystem bị xoá** mỗi lần service khởi động lại/ngủ dậy → nếu lưu bằng file
+   `data.json` thì dữ liệu người chơi sẽ mất. Khắc phục: lưu vào **Neon Postgres** (bước dưới).
+2. **Service ngủ sau 15 phút** không có ai truy cập; người chơi vào lại đầu tiên phải chờ
+   khoảng 30–60 giây để service thức dậy. Chấp nhận được ở giai đoạn đầu.
+   **Dữ liệu trong Neon an toàn tuyệt đối** qua các lần ngủ/khởi động lại này.
+
+Các bước:
+
+1. **Tạo database Neon (miễn phí):**
+   - Đăng ký tại [neon.tech](https://neon.tech) → tạo project mới (gói Free).
+   - Ở trang project, bấm **Connect** → lấy **connection string** (chọn bản **pooled**,
+     host có chữ `-pooler`), dạng `postgresql://user:pass@ep-...-pooler....aws.neon.tech/dbname?sslmode=require`.
+   - Không cần tạo bảng thủ công: server tự tạo bảng `game_state` khi khởi động lần đầu.
+2. **Tạo Web Service trên Render (miễn phí):**
+   - [render.com](https://render.com) → **New → Web Service** → trỏ tới repo code này.
+   - Runtime: Node; **Start Command: `npm start`** (host tự cấp biến `PORT`).
+   - Vào mục **Environment**, đặt 2 biến:
+     - `DATABASE_URL` = connection string Neon ở bước 1.
+     - `OWNER_KEY` = mã chủ game bí mật của bạn (tự đặt, đừng dùng mặc định).
+   - Deploy. Mở log kiểm tra có dòng `storage: neon` là đúng chế độ.
+3. Sau khi deploy, bạn có link dạng `https://<ten-app>.onrender.com`.
+   Dán link này vào BotFather: `/newapp` → chọn bot **@ThoMoVang_bot** → nhập link khi được hỏi
+   Web App URL; và `/setmenubutton` → dán cùng link để có nút mở game trong khung chat bot.
+
+## Deploy lên host khác (Railway / Fly.io / VPS...)
 
 Server chỉ cần Node.js >= 18, không cần `npm install` (không có thư viện ngoài).
 
-- **Render / Railway / Fly.io / VPS**: trỏ lệnh chạy là `node server.js`, host sẽ tự đặt `PORT`.
-  Nhớ đặt thêm biến môi trường `OWNER_KEY` trong phần cấu hình của host.
-- Sau khi deploy, bạn có link dạng `https://<ten-app>.onrender.com` (hoặc domain của host).
-  Dán link này vào BotFather: `/newapp` → chọn bot **@ThoMoVang_bot** → nhập link khi được hỏi
-  Web App URL; và `/setmenubutton` → dán cùng link để có nút mở game trong khung chat bot.
-- Lưu ý: file `data.json` nằm trên đĩa của host. Nếu dùng host miễn phí có đĩa tạm thời
-  (ephemeral filesystem), dữ liệu có thể mất khi host khởi động lại — nên dùng gói có
-  persistent disk hoặc VPS nếu chạy lâu dài cho người chơi thật.
+- Trỏ lệnh chạy là `node server.js` (hoặc `npm start`), host sẽ tự đặt `PORT`.
+- Đặt biến môi trường `OWNER_KEY`; đặt thêm `DATABASE_URL` (Neon) nếu host không có đĩa bền.
+  Nếu host có persistent disk/VPS thì cứ để trống `DATABASE_URL`, server lưu file `data.json` như cũ.
 
 ## API chính
 

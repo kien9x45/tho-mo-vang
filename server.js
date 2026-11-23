@@ -2,7 +2,10 @@
 /*
  * Thợ Mỏ Vàng — server độc lập, KHÔNG dùng thư viện ngoài.
  * Chạy: node server.js   (cổng: process.env.PORT, mặc định 3000)
- * Dữ liệu: data.json cùng thư mục (ghi an toàn: file tạm + rename).
+ * Dữ liệu: nếu có biến môi trường DATABASE_URL -> lưu vào Neon Postgres (bảng game_state,
+ *   qua Neon HTTP API bằng fetch thuần) để không mất dữ liệu khi host miễn phí (Render Free)
+ *   xoá filesystem lúc khởi động lại. Không có DATABASE_URL -> lưu file data.json cùng
+ *   thư mục như trước (ghi an toàn: file tạm + rename).
  * Mã chủ game: biến môi trường OWNER_KEY (mặc định "thomovang123" — hãy đổi khi deploy thật).
  */
 const http = require('http');
@@ -46,25 +49,122 @@ const MINERS = [
   { id: 'gian_khoan', name: 'Giàn Khoan Vàng', baseCost: 1500000, gps: 2600 },
 ];
 
-/* ---------------- Lưu trữ ---------------- */
+/* ---------------- Lưu trữ ----------------
+ * Hai backend, chọn theo biến môi trường:
+ *  - Có DATABASE_URL  -> Neon Postgres qua HTTP API (giao thức của Neon serverless driver):
+ *      POST https://<host trong connection string>/sql
+ *      Header: Neon-Connection-String: <DATABASE_URL đầy đủ>, Content-Type: application/json
+ *      Body:   {"query": "...", "params": [...]}   (tham số dạng $1, $2...)
+ *      Đáp:    {"fields": [...], "rows": [[...], ...], "rowCount": n, "command": "..."}
+ *    Toàn bộ state nằm ở 1 dòng id=1 của bảng game_state (cột data JSONB),
+ *    đúng cấu trúc của data.json trước đây.
+ *    Biến phụ NEON_HTTP_BASE (chỉ để test local với mock server, KHÔNG cần khi dùng
+ *    Neon thật): ghi đè địa chỉ gốc, ví dụ NEON_HTTP_BASE=http://localhost:4517
+ *    thì câu SQL được POST tới http://localhost:4517/sql.
+ *  - Không có DATABASE_URL -> file data.json như cũ (chạy local).
+ */
+const DATABASE_URL = process.env.DATABASE_URL || '';
+const USE_NEON = !!DATABASE_URL;
+let NEON_SQL_URL = null;
+if (USE_NEON) {
+  if (process.env.NEON_HTTP_BASE) {
+    NEON_SQL_URL = process.env.NEON_HTTP_BASE.replace(/\/+$/, '') + '/sql';
+  } else {
+    // Trích host từ connection string (kèm cổng nếu có), giữ nguyên cả host dạng -pooler
+    NEON_SQL_URL = 'https://' + new URL(DATABASE_URL).host + '/sql';
+  }
+}
+
 function emptyData() {
   return { players: {}, giftCodes: {}, redemptions: {}, withdrawals: [] };
 }
-function loadData() {
+function isValidData(d) {
+  return !!d && !!d.players && !!d.giftCodes && !!d.redemptions && Array.isArray(d.withdrawals);
+}
+function loadDataFromFile() {
   try {
-    const raw = fs.readFileSync(DATA_FILE, 'utf8');
-    const d = JSON.parse(raw);
-    if (!d.players || !d.giftCodes || !d.redemptions || !Array.isArray(d.withdrawals)) return emptyData();
-    return d;
+    const d = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    return isValidData(d) ? d : emptyData();
   } catch (_) {
     return emptyData();
   }
 }
-let data = loadData();
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Gửi 1 câu SQL tới Neon HTTP API; thử lại tối đa 3 lần khi lỗi mạng/5xx (Neon khuyến nghị retry).
+async function neonQuery(query, params) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const resp = await fetch(NEON_SQL_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Neon-Connection-String': DATABASE_URL,
+        },
+        body: JSON.stringify({ query, params: params || [] }),
+      });
+      const text = await resp.text();
+      let json = null;
+      try { json = JSON.parse(text); } catch (_) { /* giữ null */ }
+      if (!resp.ok) {
+        const msg = (json && (json.message || json.error)) || ('Neon HTTP ' + resp.status);
+        const err = new Error(msg);
+        err.status = resp.status;
+        throw err;
+      }
+      return json;
+    } catch (e) {
+      lastErr = e;
+      // Lỗi 4xx (sai SQL/tham số) thì không thử lại; lỗi mạng/5xx thì thử lại
+      if (e.status && e.status >= 400 && e.status < 500) break;
+      if (attempt < 2) await sleep(250 * (attempt + 1));
+    }
+  }
+  throw lastErr;
+}
+
+let data = emptyData();
+// Hàng đợi ghi Neon: các lần ghi chạy nối tiếp nhau, không ghi chồng.
+// Mỗi lần ghi chụp toàn bộ state tại thời điểm ghi thực tế nên luôn lưu bản mới nhất.
+let writeChain = Promise.resolve();
 function persist() {
-  const tmp = DATA_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-  fs.renameSync(tmp, DATA_FILE);
+  if (!USE_NEON) {
+    const tmp = DATA_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+    fs.renameSync(tmp, DATA_FILE);
+    return Promise.resolve();
+  }
+  const p = writeChain.then(async () => {
+    const snapshot = JSON.stringify(data);
+    await neonQuery(
+      'INSERT INTO game_state (id, data, updated_at) VALUES (1, $1::jsonb, now()) ' +
+      'ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()',
+      [snapshot]
+    );
+  });
+  // Giữ chuỗi không bị gãy khi 1 lần ghi lỗi; lỗi vẫn được báo cho lần ghi đang chờ (p)
+  writeChain = p.catch(() => {});
+  return p;
+}
+
+async function initStorage() {
+  if (USE_NEON) {
+    await neonQuery(
+      'CREATE TABLE IF NOT EXISTS game_state (id INT PRIMARY KEY, data JSONB, updated_at TIMESTAMPTZ DEFAULT now())'
+    );
+    const r = await neonQuery('SELECT data FROM game_state WHERE id = 1');
+    const row = r && Array.isArray(r.rows) ? r.rows[0] : null;
+    if (row) {
+      let v = Array.isArray(row) ? row[0] : row.data;
+      if (typeof v === 'string') { try { v = JSON.parse(v); } catch (_) { v = null; } }
+      if (isValidData(v)) data = v;
+    }
+    console.log('storage: neon');
+  } else {
+    data = loadDataFromFile();
+    console.log('storage: file');
+  }
 }
 
 /* ---------------- Logic game phía server ---------------- */
@@ -107,9 +207,9 @@ function newSave(playerId, now) {
   };
 }
 function getOrCreatePlayer(playerId, now) {
+  // Chỉ tạo trong bộ nhớ; handler gọi hàm này luôn `await persist()` sau khi xử lý xong
   if (!data.players[playerId]) {
     data.players[playerId] = newSave(playerId, now);
-    persist();
   }
   return data.players[playerId];
 }
@@ -168,7 +268,7 @@ const server = http.createServer(async (req, res) => {
       if (!playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
       const save = getOrCreatePlayer(String(playerId), now);
       const offlineEarned = applyOffline(save, now);
-      persist();
+      await persist();
       return sendJson(res, 200, { save, offlineEarned, miners: MINERS, milestones: MILESTONES });
     }
 
@@ -212,7 +312,7 @@ const server = http.createServer(async (req, res) => {
       }
       save._lastSync = now;
       save.lastSeen = now;
-      persist();
+      await persist();
       return sendJson(res, 200, { save });
     }
 
@@ -231,7 +331,7 @@ const server = http.createServer(async (req, res) => {
       save.gold -= cost;
       save.gems += gems;
       save._lastSync = now; save.lastSeen = now;
-      persist();
+      await persist();
       return sendJson(res, 200, { save, exchanged: { gold: cost, gems } });
     }
 
@@ -250,7 +350,7 @@ const server = http.createServer(async (req, res) => {
       save.gold += gift.gold || 0;
       save.gems += gift.gems || 0;
       save._lastSync = now; save.lastSeen = now;
-      persist();
+      await persist();
       return sendJson(res, 200, { save, reward: { gold: gift.gold || 0, gems: gift.gems || 0 } });
     }
 
@@ -264,7 +364,7 @@ const server = http.createServer(async (req, res) => {
         const gold = Math.max(0, Math.floor(body.gold || 0));
         const gems = Math.max(0, Math.floor(body.gems || 0));
         data.giftCodes[code] = { gold, gems, createdAt: now };
-        persist();
+        await persist();
         return sendJson(res, 200, { ok: true, code, gold, gems });
       }
       if (req.method === 'GET') {
@@ -300,7 +400,7 @@ const server = http.createServer(async (req, res) => {
       };
       data.withdrawals.push(wd);
       save._lastSync = now; save.lastSeen = now;
-      persist();
+      await persist();
       return sendJson(res, 200, { save, withdrawal: wd });
     }
 
@@ -335,7 +435,7 @@ const server = http.createServer(async (req, res) => {
         }
       }
       me._lastSync = now; me.lastSeen = now;
-      persist();
+      await persist();
       return sendJson(res, 200, { save: me, reward: REFERRAL_REWARD });
     }
 
@@ -358,6 +458,14 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log('Thợ Mỏ Vàng đang chạy tại http://localhost:' + PORT);
-});
+initStorage()
+  .then(() => {
+    server.listen(PORT, () => {
+      console.log('Thợ Mỏ Vàng đang chạy tại http://localhost:' + PORT);
+    });
+  })
+  .catch((e) => {
+    // Không in DATABASE_URL/mật khẩu ra log — chỉ in thông điệp lỗi
+    console.error('Không khởi tạo được bộ lưu trữ, server không khởi động:', e.message);
+    process.exit(1);
+  });
