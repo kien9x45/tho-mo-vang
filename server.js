@@ -52,6 +52,68 @@ const MINERS = [
   { id: 'gian_khoan', name: 'Giàn Khoan Vàng', baseCost: 1500000, gps: 2600 },
 ];
 
+/* ---------------- Bot Telegram: tin chào khi người chơi bấm /start ----------------
+ * Biến môi trường:
+ *  - BOT_TOKEN: token của @ThoMoVang_bot (chủ game tự đặt trên Render; KHÔNG ghi
+ *    token vào code hay log). Không có BOT_TOKEN -> bot tắt, game chạy bình thường.
+ *  - GAME_URL: địa chỉ public của game (Render tự cấp RENDER_EXTERNAL_URL; mặc
+ *    định là bản live tho-mo-vang.onrender.com).
+ *  - TELEGRAM_API_BASE: chỉ để test local với mock server (mặc định api.telegram.org).
+ * Lúc khởi động, có BOT_TOKEN thì server tự gọi setWebhook trỏ về
+ * /api/telegram-webhook của chính nó, kèm secret_token = sha256(BOT_TOKEN);
+ * các update Telegram gửi tới được xác thực qua header
+ * x-telegram-bot-api-secret-token.
+ */
+const BOT_TOKEN = process.env.BOT_TOKEN || '';
+const GAME_URL = (process.env.GAME_URL || process.env.RENDER_EXTERNAL_URL || 'https://tho-mo-vang.onrender.com').replace(/\/+$/, '');
+const TELEGRAM_API_BASE = (process.env.TELEGRAM_API_BASE || 'https://api.telegram.org').replace(/\/+$/, '');
+const WEBHOOK_SECRET = BOT_TOKEN ? crypto.createHash('sha256').update(BOT_TOKEN).digest('hex') : '';
+const WELCOME_TEXT = [
+  '👋 Chào mừng đến với Thợ Mỏ Vàng!',
+  '',
+  'Hãy bắt đầu nâng cấp thợ mỏ, gom vàng đổi kim cương và rút tiền thẳng về ngân hàng. Nâng cấp cấp độ thợ mỏ để tăng tốc độ đào và nhận nhiều phần thưởng hơn.',
+  '',
+  '⛏️ Chúc bạn đào được thật nhiều vàng!',
+].join('\n');
+
+async function telegramApi(method, payload) {
+  const r = await fetch(TELEGRAM_API_BASE + '/bot' + BOT_TOKEN + '/' + method, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return r.json().catch(() => ({}));
+}
+
+async function sendWelcome(chatId, startPayload) {
+  const gameUrl = startPayload ? GAME_URL + '/?startapp=' + encodeURIComponent(startPayload) : GAME_URL;
+  await telegramApi('sendMessage', {
+    chat_id: chatId,
+    text: WELCOME_TEXT,
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '⛏ Chơi Game', web_app: { url: gameUrl } }],
+        [{ text: '📣 Kênh nhận mã quà', url: 'https://t.me/ThoMoVangOfficial' }],
+      ],
+    },
+  });
+}
+
+async function registerTelegramWebhook() {
+  if (!BOT_TOKEN) return;
+  try {
+    const j = await telegramApi('setWebhook', {
+      url: GAME_URL + '/api/telegram-webhook',
+      secret_token: WEBHOOK_SECRET,
+      allowed_updates: ['message'],
+      drop_pending_updates: false,
+    });
+    console.log(j && j.ok ? 'Telegram webhook: đã đăng ký' : 'Telegram webhook: đăng ký thất bại - ' + ((j && j.description) || 'không rõ lý do'));
+  } catch (e) {
+    console.error('Telegram webhook: lỗi khi đăng ký:', e.message);
+  }
+}
+
 /* ---------------- Lưu trữ ----------------
  * Hai backend, chọn theo biến môi trường:
  *  - Có DATABASE_URL  -> Neon Postgres qua HTTP API (giao thức của Neon serverless driver):
@@ -618,6 +680,21 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    /* ---- POST /api/telegram-webhook (Bot Telegram: chào khi /start) ---- */
+    if (req.method === 'POST' && url.pathname === '/api/telegram-webhook') {
+      if (!BOT_TOKEN) return sendJson(res, 404, { error: 'Bot chưa được bật' });
+      if (req.headers['x-telegram-bot-api-secret-token'] !== WEBHOOK_SECRET) {
+        return sendJson(res, 401, { error: 'Sai secret webhook' });
+      }
+      const update = await readBody(req);
+      const msg = update && update.message;
+      if (msg && msg.chat && msg.chat.type === 'private' && typeof msg.text === 'string' && msg.text.startsWith('/start')) {
+        const payload = msg.text.slice('/start'.length).trim().split(/\s+/)[0] || '';
+        try { await sendWelcome(msg.chat.id, payload); } catch (e) { console.error('Telegram sendMessage lỗi:', e.message); }
+      }
+      return sendJson(res, 200, { ok: true });
+    }
+
     /* ---- File tĩnh ---- */
     if (req.method === 'GET') {
       let filePath = url.pathname === '/' ? '/index.html' : url.pathname;
@@ -648,6 +725,7 @@ initStorage()
   .then(() => {
     server.listen(PORT, () => {
       console.log('Thợ Mỏ Vàng đang chạy tại http://localhost:' + PORT);
+      registerTelegramWebhook();
     });
   })
   .catch((e) => {
