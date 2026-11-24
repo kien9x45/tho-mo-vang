@@ -19,16 +19,16 @@ const DATA_FILE = path.join(__dirname, 'data.json');
 const PUBLIC_DIR = fs.existsSync(path.join(__dirname, 'public')) ? path.join(__dirname, 'public') : __dirname;
 
 /* ---------------- Thông số game (đã chốt, không tự ý đổi) ---------------- */
-const START_GOLD = 300000;          // quà tân thủ
+const START_GOLD = 50000;           // quà tân thủ (giảm từ 300.000 — cân bằng lại 2026-11-24)
 const START_GEMS = 1500;            // quà tân thủ
-const BASE_RATE = 5.8;              // Lv.1 = 5.8 + 0.2*1 = 6.0 vàng/giây
-const RATE_PER_LEVEL = 0.2;
+const BASE_RATE = 1.9;              // Lv.1 = 1.9 + 0.1*1 = 2.0 vàng/giây (giảm từ 6.0 — cân bằng lại 2026-11-24)
+const RATE_PER_LEVEL = 0.1;
 const UPGRADE_COST_GEMS = 5000;     // nâng cấp thợ: phẳng 5.000 KC/cấp (client hiển thị, trừ KC qua /api/save có kiểm tra)
 const EXCHANGE_RATE = 125;          // 125 vàng = 1 kim cương (một chiều vàng -> KC)
 const WITHDRAW_RATE = 0.0005;       // 1 vàng = 0,0005 VNĐ
 const WITHDRAW_MIN_GOLD = 4000000;  // tối thiểu 4.000.000 vàng
 const SESSION_SECONDS = 4 * 3600;   // phiên đào 4 giờ
-const OFFLINE_CAP_SECONDS = 8 * 3600;
+const OFFLINE_CAP_SECONDS = 6 * 3600; // trần offline 6 giờ (giảm từ 8 giờ — cân bằng lại 2026-11-24)
 const OFFLINE_RATE = 0.25;          // offline = 25% tốc độ thường
 const REFERRAL_REWARD = { gold: 20000, gems: 100 }; // quà NGAY cho người được mời khi ghi nhận ref
 const REFERRAL_INVITER_REWARD = { gold: 2000, gems: 10 }; // quà NGAY cho người mời khi bạn mới ghi nhận ref
@@ -44,12 +44,12 @@ const BANKS = ['MB Bank', 'Vietcombank', 'Techcombank', 'ACB', 'BIDV', 'MoMo'];
 
 // Thợ/máy thuê đào tự động (giá vàng, cộng vàng/giây), giá tăng 15% mỗi con đã có
 const MINERS = [
-  { id: 'tap_su',   name: 'Thợ Mỏ Tập Sự',   baseCost: 150,     gps: 1 },
-  { id: 'lanh_nghe', name: 'Thợ Mỏ Lành Nghề', baseCost: 1200,  gps: 6 },
-  { id: 'doi_dao',  name: 'Đội Đào Vàng',    baseCost: 8000,    gps: 25 },
-  { id: 'may_khoan', name: 'Máy Khoan Đá',   baseCost: 45000,   gps: 110 },
-  { id: 'may_xuc',  name: 'Máy Xúc Vàng',    baseCost: 260000,  gps: 520 },
-  { id: 'gian_khoan', name: 'Giàn Khoan Vàng', baseCost: 1500000, gps: 2600 },
+  { id: 'tap_su',   name: 'Thợ Mỏ Tập Sự',   baseCost: 150,     gps: 0.0625 },
+  { id: 'lanh_nghe', name: 'Thợ Mỏ Lành Nghề', baseCost: 1200,  gps: 0.3125 },
+  { id: 'doi_dao',  name: 'Đội Đào Vàng',    baseCost: 8000,    gps: 1.375 },
+  { id: 'may_khoan', name: 'Máy Khoan Đá',   baseCost: 45000,   gps: 7.5 },
+  { id: 'may_xuc',  name: 'Máy Xúc Vàng',    baseCost: 260000,  gps: 40.625 },
+  { id: 'gian_khoan', name: 'Giàn Khoan Vàng', baseCost: 1500000, gps: 200 },
 ];
 
 /* ---------------- Bot Telegram: tin chào khi người chơi bấm /start ----------------
@@ -352,7 +352,7 @@ function publicWithdrawal(w) {
   };
 }
 
-// Tính vàng offline: chỉ trong thời gian phiên còn hiệu lực, tối đa 8 giờ, 25% tốc độ thường
+// Tính vàng offline: chỉ trong thời gian phiên còn hiệu lực, tối đa 6 giờ, 25% tốc độ thường
 function applyOffline(save, now) {
   const last = save.lastSeen || now;
   let seconds = Math.floor((now - last) / 1000);
