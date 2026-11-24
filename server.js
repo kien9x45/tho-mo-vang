@@ -470,6 +470,7 @@ function publicWithdrawal(w) {
     accountName: w.accountName || w.name || '',
     gold: w.gold,
     vnd: w.vnd,
+    sanctioned: !!w.sanctioned, // true = đơn bị tịch thu khi reset tài khoản gian lận (không hoàn vàng)
     status: withdrawalStatusOf(w),
     createdAt: w.createdAt,
     processedAt: w.processedAt || null,
@@ -937,6 +938,46 @@ const server = http.createServer(async (req, res) => {
       }
       await persist();
       return sendJson(res, 200, { ok: true, withdrawal: publicWithdrawal(wd) });
+    }
+
+    /* ---- POST /api/players/reset (owner) {playerId} ----
+     * Xử lý tài khoản gian lận: TỊCH THU toàn bộ vàng/KC + đội thợ và đưa tài
+     * khoản về trạng thái người chơi mới. Mọi đơn rút đang chờ của họ bị từ
+     * chối KHÔNG hoàn vàng (khác nút "Từ chối" thường) và gắn cờ sanctioned
+     * để phân biệt trong lịch sử. Bản ghi mới giữ playerId, mã giới thiệu,
+     * người giới thiệu và ngày tạo gốc; lịch sử nhập mã quà được giữ nguyên
+     * để họ không farm lại quà. Client cũ của họ không hồi được tài sản:
+     * các save sau reset vẫn đi qua cơ chế delta + kiểm chứng mua thợ/cấp
+     * với ngân sách của tài khoản mới (50.000 vàng). */
+    if (req.method === 'POST' && url.pathname === '/api/players/reset') {
+      if (rateLimited('owner:' + clientIp(req), 60, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít phút' });
+      }
+      if (!isOwner(req)) return sendJson(res, 401, { error: 'Sai mã chủ game (header x-owner-key)' });
+      const body = await readBody(req);
+      const pid = String(body.playerId || '');
+      const old = data.players[pid];
+      if (!old) return sendJson(res, 404, { error: 'Không tìm thấy người chơi này' });
+      let pendingGold = 0;
+      let pendingCount = 0;
+      for (const w of data.withdrawals) {
+        if (w.playerId === pid && withdrawalStatusOf(w) === 'pending') {
+          w.status = 'rejected';
+          w.sanctioned = true;
+          w.processedAt = now;
+          pendingGold += w.gold || 0;
+          pendingCount++;
+        }
+      }
+      const confiscated = { gold: (old.gold || 0) + pendingGold, gems: old.gems || 0, pendingCount };
+      const fresh = newSave(pid, now);
+      fresh.createdAt = old.createdAt || now;
+      fresh.referredBy = old.referredBy || null;
+      fresh.resets = (old.resets || 0) + 1;
+      fresh.lastResetAt = now;
+      data.players[pid] = fresh;
+      await persist();
+      return sendJson(res, 200, { ok: true, playerId: pid, confiscated, resets: fresh.resets });
     }
 
     /* ---- POST /api/referral {playerId, code} ----
