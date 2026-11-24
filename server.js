@@ -264,6 +264,57 @@ function gpsOf(save) {
   }
   return gps;
 }
+/* ---- Vá chống gian lận 2026-11-24: kiểm chứng việc MUA THỢ phía server ----
+ * Giá thuê THẬT phía client (App.tsx MINERS, tăng x1.15 mỗi con đã có) — bảng
+ * baseCost trong MINERS phía server là số cũ, không dùng cho kiểm tra này. */
+const MINER_CHECK_PRICES = { tap_su: 45, lanh_nghe: 300, doi_dao: 3300, may_khoan: 36000, may_xuc: 390000, gian_khoan: 4200000 };
+// Hai loại thợ chỉ có phía client (đóng gói trong extras __tmv): giá + gps hiện tại.
+const EXTRA_MINERS = {
+  robot: { baseCost: 60000000, gps: 1000 },
+  mo_tu_dong: { baseCost: 990000000, gps: 5312.5 },
+};
+// Tổng giá hình học (không làm tròn từng con) để kiểm tra khả năng chi trả.
+function seriesCost(base, from, to) {
+  if (to <= from || base <= 0) return 0;
+  return base * Math.pow(1.15, from) * (Math.pow(1.15, to - from) - 1) / 0.15;
+}
+// Giá đúng như client tính: ceil(base x 1.15^k) cho từng con thuê thêm.
+function hireCostExact(base, from, to) {
+  let t = 0;
+  const n = Math.min(to, from + 5000);
+  for (let k = from; k < n; k++) t += Math.ceil(base * Math.pow(1.15, k));
+  if (to > n) t += Math.ceil(seriesCost(base, n, to));
+  return t;
+}
+// Số lượng tối đa mua được trong ngân sách (nhị phân trên giá hình học).
+function affordableCount(base, from, want, budget) {
+  if (want <= from || seriesCost(base, from, want) <= budget) return want;
+  let lo = from, hi = want;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (seriesCost(base, from, mid) <= budget) lo = mid; else hi = mid - 1;
+  }
+  return lo;
+}
+// Đọc extras (client đóng gói JSON trong tasks.progress.__tmv); null nếu hỏng.
+function extrasOf(tasks) {
+  try {
+    const raw = tasks && tasks.progress && tasks.progress.__tmv;
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    return o && typeof o === 'object' ? o : null;
+  } catch { return null; }
+}
+// gps cộng thêm từ thợ client-only ĐÃ ĐƯỢC LƯU (đã qua kiểm chứng chi trả).
+function extraGpsOf(extras) {
+  if (!extras || !extras.ownedExtra) return 0;
+  let g = 0;
+  for (const [id, def] of Object.entries(EXTRA_MINERS)) {
+    const n = Math.min(5, Math.max(0, Math.floor(extras.ownedExtra[id] || 0)));
+    g += def.gps * n;
+  }
+  return g;
+}
 function makeReferralCode(playerId) {
   const h = crypto.createHash('sha256').update(playerId).digest('hex').slice(0, 6).toUpperCase();
   return 'TMV' + h;
@@ -283,6 +334,7 @@ function newSave(playerId, now) {
     referredBy: null,
     refMilestoneDone: false, // (cũ) đã trả thưởng mốc 100.000 kiểu cũ chưa — giữ để di trú
     refTiersPaid: 0,          // số tier thưởng ref đã trả cho người giới thiệu nhờ player này (0..3)
+    _burst: 15000,            // ngân sách chống gian lận còn lại (xem POST /api/save)
     friendsCount: 0,
     milestonesPaid: [],
     lastCheckin: null,      // 'YYYY-MM-DD'
@@ -502,11 +554,70 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 400, { error: 'Số liệu không hợp lệ: ' + f });
         }
       }
-      // Chống gian lận ở mức hợp lý: vàng/KC tăng không vượt quá khả năng kiếm được
-      // kể từ lần đồng bộ trước (GPS * thời gian * 2 + đệm cho chạm đào/nhiệm vụ).
+      // ---- Chống gian lận (vá 2026-11-24) ----
+      // Hạn mức kiếm vàng theo THỜI GIAN THẬT qua "ngân sách" _burst: nạp lại
+      // theo (gps server tự tính x2 + chạm đào) x số giây từ lần lưu trước,
+      // trần 600.000 để các khoản nhận một lần hợp lệ (điểm danh theo gps,
+      // nhiệm vụ, rương quảng cáo) không bị chặn nhầm. Bản vá này thay đệm cố
+      // định +200.000/lần lưu trước đây — script gửi save liên tục từng bơm
+      // vàng nằm trong khoản đệm đó. Vàng server tự cộng (offline, ref, mã
+      // quà, hoàn rút tiền) không đi qua hạn mức này.
       const dtSec = Math.max(1, (now - (save._lastSync || save.lastSeen || now)) / 1000);
-      const maxGoldGain = gpsOf(save) * dtSec * 2 + 200000;
       const maxGemsGain = 20000;
+      const storedExtras = extrasOf(save.tasks);
+      const incExtras = extrasOf(inc.tasks);
+      let clickLevel = 1;
+      const clRaw = (incExtras && incExtras.clickLevel) || (storedExtras && storedExtras.clickLevel);
+      if (Number.isFinite(clRaw)) clickLevel = Math.min(500, Math.max(1, Math.floor(clRaw)));
+      const refill = ((gpsOf(save) + extraGpsOf(storedExtras)) * 2 + Math.max(10, clickLevel * 10)) * dtSec;
+      if (!Number.isFinite(save._burst)) save._burst = 100000;
+      const allowance = Math.min(600000, save._burst + refill);
+      // Số thợ tăng lên phải TRẢ ĐỦ TIỀN: tổng giá các thợ mới (tính theo giá
+      // thật phía client) phải nằm trong khả năng chi trả = số dư server +
+      // hạn mức kỳ này; khai khống bị cắt bớt số lượng ngay tại server, và giá
+      // trị phần thuê được trừ vào hạn mức tăng vàng của kỳ (hireCost).
+      const hasMinerReport = inc.miners && typeof inc.miners === 'object';
+      const claimedMiners = {};
+      if (hasMinerReport) {
+        for (const m of MINERS) {
+          const n = inc.miners[m.id];
+          if (Number.isInteger(n) && n >= 0) claimedMiners[m.id] = n;
+        }
+      }
+      let hireCost = 0;
+      let budget = save.gold + allowance;
+      if (hasMinerReport) {
+        for (const m of MINERS) {
+          const old = (save.miners && save.miners[m.id]) || 0;
+          const want0 = claimedMiners[m.id] || 0;
+          if (want0 > old) {
+            const want = affordableCount(MINER_CHECK_PRICES[m.id], old, want0, budget);
+            claimedMiners[m.id] = want;
+            const c = hireCostExact(MINER_CHECK_PRICES[m.id], old, want);
+            hireCost += c;
+            budget -= c;
+          }
+        }
+      }
+      // Tương tự với 2 thợ client-only trong extras (robot / mỏ tự động AI):
+      // cắt khai khống theo cùng ngân sách và ghi extras đã cắt trở lại save.
+      if (incExtras && incExtras.ownedExtra && typeof incExtras.ownedExtra === 'object') {
+        let extrasDirty = false;
+        for (const [id, def] of Object.entries(EXTRA_MINERS)) {
+          const old = Math.max(0, Math.floor((storedExtras && storedExtras.ownedExtra && storedExtras.ownedExtra[id]) || 0));
+          const want0 = Math.max(0, Math.floor(incExtras.ownedExtra[id] || 0));
+          if (want0 > old) {
+            const want = affordableCount(def.baseCost, old, want0, budget);
+            if (want !== want0) { incExtras.ownedExtra[id] = want; extrasDirty = true; }
+            const c = hireCostExact(def.baseCost, old, want);
+            hireCost += c;
+            budget -= c;
+          }
+        }
+        if (extrasDirty && inc.tasks && inc.tasks.progress) {
+          inc.tasks.progress.__tmv = JSON.stringify(incExtras);
+        }
+      }
       // Vàng/KC gộp theo DELTA thay vì ghi đè tuyệt đối: các khoản server tự cộng
       // (thưởng giới thiệu/mốc bạn bè, đổi mã quà...) nằm trong số dư server nhưng
       // client chưa biết — ghi đè tuyệt đối sẽ xoá mất chúng ở lần save sau.
@@ -519,9 +630,13 @@ const server = http.createServer(async (req, res) => {
         const base = Number.isFinite(inc.baseGold) ? inc.baseGold
           : (Number.isFinite(save._clientGold) ? save._clientGold : save.gold);
         let delta = inc.gold - base;
-        if (delta > maxGoldGain) delta = Math.floor(maxGoldGain);
+        const cap = allowance - hireCost;
+        if (delta > cap) delta = Math.floor(cap);
         save.gold = Math.max(0, Math.floor(save.gold + delta));
         save._clientGold = save.gold;
+        save._burst = Math.max(0, allowance - Math.max(0, delta + hireCost));
+      } else {
+        save._burst = allowance;
       }
       if (inc.gems !== undefined) {
         const base = Number.isFinite(inc.baseGems) ? inc.baseGems
@@ -532,17 +647,17 @@ const server = http.createServer(async (req, res) => {
         save._clientGems = save.gems;
       }
 
-      const keep = ['minerLevel', 'tapPower', 'totalEarned', 'totalTaps',
+      const keep = ['minerLevel', 'tapPower', 'totalTaps',
         'lastCheckin', 'checkinStreak', 'tasks', 'achievementsClaimed'];
       for (const f of keep) if (inc[f] !== undefined) save[f] = inc[f];
-      if (inc.miners && typeof inc.miners === 'object') {
-        const clean = {};
-        for (const m of MINERS) {
-          const n = inc.miners[m.id];
-          if (Number.isInteger(n) && n >= 0) clean[m.id] = n;
-        }
-        save.miners = clean;
+      if (Number.isFinite(inc.totalEarned)) {
+        // Tổng đào tích lũy là căn cứ trả thưởng ref cho người giới thiệu —
+        // không cho tăng nhanh hơn khả năng kiếm thật của kỳ này, tránh tự
+        // khai 2.000.000 để người mời lĩnh đủ 3 tier + mốc bạn chăm.
+        const capEarned = (save.totalEarned || 0) + allowance;
+        save.totalEarned = Math.max(save.totalEarned || 0, Math.min(inc.totalEarned, capEarned));
       }
+      if (hasMinerReport) save.miners = claimedMiners;
       if (Number.isFinite(inc.sessionEnd) && inc.sessionEnd >= 0) {
         // phiên tối đa 4 giờ kể từ hiện tại (cộng thêm độ trễ nhỏ)
         save.sessionEnd = Math.min(inc.sessionEnd, now + SESSION_SECONDS * 1000 + 60000);
