@@ -1180,6 +1180,44 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { save: me, reward, playerLevel: myLevel });
     }
 
+    /* ---- GET /api/owner/top-players (chỉ chủ game) ----
+     * Bản ĐẦY ĐỦ của bảng xếp hạng dành riêng cho chủ game: kèm playerId,
+     * số dư vàng/KC, cấp thợ, tổng số thợ, số bạn bè, tuổi tài khoản và số
+     * lần đã bị reset — để chủ game nhận diện tài khoản bất thường và xử
+     * lý ngay bằng POST /api/players/reset. */
+    if (req.method === 'GET' && url.pathname === '/api/owner/top-players') {
+      if (!isOwner(req)) return sendJson(res, 401, { error: 'Sai mã chủ game (header x-owner-key)' });
+      if (rateLimited('owner:' + clientIp(req), 60, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const ranked = Object.values(data.players)
+        .filter((p) => p && Number(p.totalEarned) > 0)
+        .sort((a, b) => (b.totalEarned - a.totalEarned) || ((a.createdAt || 0) - (b.createdAt || 0)));
+      const players = ranked.slice(0, 50).map((p, i) => {
+        const extras = extrasOf(p.tasks) || {};
+        const oe = (extras.ownedExtra && typeof extras.ownedExtra === 'object') ? extras.ownedExtra : {};
+        const minersCount = Object.values(p.miners || {}).reduce((s, n) => s + (Number(n) || 0), 0)
+          + (Number(oe.robot) || 0) + (Number(oe.mo_tu_dong) || 0);
+        return {
+          rank: i + 1,
+          playerId: p.playerId,
+          name: (typeof p.displayName === 'string' && p.displayName) || ('Thợ mỏ #' + String(p.referralCode || p.playerId || '????').slice(-4).toUpperCase()),
+          level: playerLevelOf(p.totalEarned),
+          totalEarned: Math.floor(p.totalEarned),
+          gold: Math.floor(p.gold || 0),
+          gems: Math.floor(p.gems || 0),
+          minerLevel: p.minerLevel || 1,
+          minersCount,
+          friendsCount: friendsCountOf(p.playerId),
+          referredBy: p.referredBy || null,
+          createdAt: p.createdAt || null,
+          lastSeen: p.lastSeen || null,
+          resets: p.resets || 0,
+        };
+      });
+      return sendJson(res, 200, { players, total: ranked.length });
+    }
+
     /* ---- GET /api/leaderboard?playerId= ----
      * Bảng xếp hạng theo TỔNG VÀNG ĐÀO (totalEarned — con số server đã gác
      * bằng cơ chế chống gian lận ở POST /api/save). Trả Top 50 + hạng của
