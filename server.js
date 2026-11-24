@@ -6,7 +6,7 @@
  *   qua Neon HTTP API bằng fetch thuần) để không mất dữ liệu khi host miễn phí (Render Free)
  *   xoá filesystem lúc khởi động lại. Không có DATABASE_URL -> lưu file data.json cùng
  *   thư mục như trước (ghi an toàn: file tạm + rename).
- * Mã chủ game: biến môi trường OWNER_KEY (mặc định "thomovang123" — hãy đổi khi deploy thật).
+ * Mã chủ game: biến môi trường OWNER_KEY (không đặt = khoá luôn các endpoint chủ game).
  */
 const http = require('http');
 const fs = require('fs');
@@ -14,7 +14,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
-const OWNER_KEY = process.env.OWNER_KEY || 'thomovang123';
+const OWNER_KEY = process.env.OWNER_KEY || ''; // rỗng = khoá luôn endpoint chủ game (không còn mã mặc định trong code)
 const DATA_FILE = path.join(__dirname, 'data.json');
 const PUBLIC_DIR = fs.existsSync(path.join(__dirname, 'public')) ? path.join(__dirname, 'public') : __dirname;
 
@@ -288,6 +288,7 @@ function hireCostExact(base, from, to) {
 }
 // Số lượng tối đa mua được trong ngân sách (nhị phân trên giá hình học).
 function affordableCount(base, from, want, budget) {
+  if (!Number.isFinite(want)) return from; // số khai khống kiểu 1e999 (Infinity) — bỏ qua, tránh vòng lặp vô hạn
   if (want <= from || seriesCost(base, from, want) <= budget) return want;
   let lo = from, hi = want;
   while (lo < hi) {
@@ -335,6 +336,7 @@ function newSave(playerId, now) {
     refMilestoneDone: false, // (cũ) đã trả thưởng mốc 100.000 kiểu cũ chưa — giữ để di trú
     refTiersPaid: 0,          // số tier thưởng ref đã trả cho người giới thiệu nhờ player này (0..3)
     _burst: 15000,            // ngân sách chống gian lận còn lại (xem POST /api/save)
+    _burstGems: 2000,         // ngân sách KC theo thời gian (vá 2026-11-24)
     friendsCount: 0,
     milestonesPaid: [],
     lastCheckin: null,      // 'YYYY-MM-DD'
@@ -513,7 +515,51 @@ function readBody(req) {
   });
 }
 function isOwner(req) {
-  return req.headers['x-owner-key'] && req.headers['x-owner-key'] === OWNER_KEY;
+  return !!OWNER_KEY && !!req.headers['x-owner-key'] && req.headers['x-owner-key'] === OWNER_KEY;
+}
+/* ---- Xác thực Telegram initData (vá bảo mật 2026-11-24) ----
+ * Tài khoản tg_<id> phải chứng minh danh tính bằng initData do Telegram ký
+ * (HMAC-SHA256, khoá dẫn xuất từ BOT_TOKEN). Thiếu lớp này, bất kỳ ai biết
+ * ID Telegram của người khác cũng đọc/ghi được save của họ và tạo đơn rút
+ * tiền hộ về tài khoản ngân hàng của mình. */
+function telegramUserIdOf(initData) {
+  if (!BOT_TOKEN || !initData || typeof initData !== 'string') return null;
+  try {
+    const params = new URLSearchParams(initData);
+    const hash = params.get('hash');
+    if (!hash) return null;
+    params.delete('hash');
+    const checkString = [...params.entries()]
+      .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      .map(([k, v]) => k + '=' + v)
+      .join('\n');
+    const secret = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+    const computed = crypto.createHmac('sha256', secret).update(checkString).digest('hex');
+    const a = Buffer.from(computed);
+    const b = Buffer.from(String(hash));
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+    const user = JSON.parse(params.get('user') || 'null');
+    return user && Number.isFinite(user.id) ? String(user.id) : null;
+  } catch { return null; }
+}
+function requestAuthorizedFor(req, playerId) {
+  if (!playerId.startsWith('tg_')) return true; // người chơi trình duyệt: id ngẫu nhiên không đoán được
+  if (!BOT_TOKEN) return true; // bot chưa bật (môi trường dev) — chưa có người chơi Telegram thật
+  const uid = telegramUserIdOf(req.headers['x-telegram-init-data']);
+  return uid !== null && uid === playerId.slice(3);
+}
+/* ---- Giới hạn tần suất tối thiểu (vá bảo mật 2026-11-24) ---- */
+const rateBuckets = new Map();
+function rateLimited(key, limit, windowMs) {
+  const t = Date.now();
+  const arr = (rateBuckets.get(key) || []).filter((x) => t - x < windowMs);
+  arr.push(t);
+  rateBuckets.set(key, arr);
+  if (rateBuckets.size > 5000) rateBuckets.clear();
+  return arr.length > limit;
+}
+function clientIp(req) {
+  return String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
 }
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.json': 'application/json' };
 
@@ -527,6 +573,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/save') {
       const playerId = url.searchParams.get('playerId');
       if (!playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      if (!requestAuthorizedFor(req, String(playerId))) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
       const save = getOrCreatePlayer(String(playerId), now);
       const offlineEarned = applyOffline(save, now);
       payRefTiersIfDue(save); // vàng offline cũng tính vào tổng đào tích lũy
@@ -544,6 +593,12 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const playerId = body.playerId;
       if (!playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      if (!requestAuthorizedFor(req, String(playerId))) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('save:' + String(playerId), 90, 30000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
       const save = getOrCreatePlayer(String(playerId), now);
       const inc = body.save || {};
 
@@ -604,8 +659,10 @@ const server = http.createServer(async (req, res) => {
       if (incExtras && incExtras.ownedExtra && typeof incExtras.ownedExtra === 'object') {
         let extrasDirty = false;
         for (const [id, def] of Object.entries(EXTRA_MINERS)) {
-          const old = Math.max(0, Math.floor((storedExtras && storedExtras.ownedExtra && storedExtras.ownedExtra[id]) || 0));
-          const want0 = Math.max(0, Math.floor(incExtras.ownedExtra[id] || 0));
+          const oldRaw = Number(storedExtras && storedExtras.ownedExtra && storedExtras.ownedExtra[id]);
+          const old = Number.isFinite(oldRaw) ? Math.min(1000, Math.max(0, Math.floor(oldRaw))) : 0;
+          const wantRaw = Number(incExtras.ownedExtra[id]);
+          const want0 = Number.isFinite(wantRaw) ? Math.min(1000, Math.max(0, Math.floor(wantRaw))) : old;
           if (want0 > old) {
             const want = affordableCount(def.baseCost, old, want0, budget);
             if (want !== want0) { incExtras.ownedExtra[id] = want; extrasDirty = true; }
@@ -638,16 +695,42 @@ const server = http.createServer(async (req, res) => {
       } else {
         save._burst = allowance;
       }
+      // KC tăng cũng theo NGÂN SÁCH THỜI GIAN như vàng (vá 2026-11-24): trần
+      // cũ +20.000/lần lưu không gắn thời gian nên script gửi save liên tục
+      // bơm KC không giới hạn. Nguồn KC hợp lệ phía client rất chậm (quảng
+      // cáo +120/lượt xem, điểm danh +5/ngày) nên nạp 30 + 5/giây, trần
+      // 20.000 là rộng rãi cho người chơi thật.
+      if (!Number.isFinite(save._burstGems)) save._burstGems = 2000;
+      const gemsAllowance = Math.min(maxGemsGain, save._burstGems + 30 + dtSec * 5);
+      let rawGemsDelta = 0;
       if (inc.gems !== undefined) {
         const base = Number.isFinite(inc.baseGems) ? inc.baseGems
           : (Number.isFinite(save._clientGems) ? save._clientGems : save.gems);
-        let delta = inc.gems - base;
-        if (delta > maxGemsGain) delta = Math.floor(maxGemsGain);
+        rawGemsDelta = inc.gems - base;
+        let delta = rawGemsDelta;
+        if (delta > gemsAllowance) delta = Math.floor(gemsAllowance);
         save.gems = Math.max(0, Math.floor(save.gems + delta));
         save._clientGems = save.gems;
+        save._burstGems = Math.max(0, gemsAllowance - Math.max(0, delta));
+      } else {
+        save._burstGems = gemsAllowance;
+      }
+      // Cấp thợ: server chỉ công nhận số cấp mà khoản KC ĐÃ TRỪ trong cùng
+      // lần lưu này trả đủ (5.000 KC/cấp) — trước đây client tự khai cấp,
+      // gps phía server phồng theo cấp khống, làm vỡ trần chống gian lận và
+      // vàng offline (vá 2026-11-24). Giảm cấp thì tự do (vô hại).
+      if (Number.isFinite(inc.minerLevel)) {
+        const want = Math.floor(inc.minerLevel);
+        const cur = save.minerLevel || 1;
+        if (want <= cur) {
+          save.minerLevel = Math.max(1, want);
+        } else {
+          const paidLevels = Math.floor(Math.max(0, -rawGemsDelta) / UPGRADE_COST_GEMS);
+          save.minerLevel = Math.min(cur + paidLevels, 10000);
+        }
       }
 
-      const keep = ['minerLevel', 'tapPower', 'totalTaps',
+      const keep = ['tapPower', 'totalTaps',
         'lastCheckin', 'checkinStreak', 'tasks', 'achievementsClaimed'];
       for (const f of keep) if (inc[f] !== undefined) save[f] = inc[f];
       if (Number.isFinite(inc.totalEarned)) {
@@ -674,6 +757,9 @@ const server = http.createServer(async (req, res) => {
     /* ---- POST /api/exchange {playerId, goldAmount} : vàng -> KC, 125:1, một chiều ---- */
     if (req.method === 'POST' && url.pathname === '/api/exchange') {
       const body = await readBody(req);
+      if (body.playerId && !requestAuthorizedFor(req, String(body.playerId))) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
       const save = body.playerId ? getOrCreatePlayer(String(body.playerId), now) : null;
       if (!save) return sendJson(res, 400, { error: 'Thiếu playerId' });
       const goldAmount = Math.floor(body.goldAmount);
@@ -695,6 +781,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/redeem') {
       const body = await readBody(req);
       if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      if (!requestAuthorizedFor(req, String(body.playerId))) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('redeem:' + clientIp(req), 15, 60000)) {
+        return sendJson(res, 429, { error: 'Nhập mã quá nhanh, thử lại sau ít phút' });
+      }
       const save = getOrCreatePlayer(String(body.playerId), now);
       const code = String(body.code || '').trim().toUpperCase();
       const gift = data.giftCodes[code];
@@ -720,6 +812,9 @@ const server = http.createServer(async (req, res) => {
 
     /* ---- POST /api/giftcodes (owner) / GET /api/giftcodes (owner) ---- */
     if (url.pathname === '/api/giftcodes') {
+      if (rateLimited('owner:' + clientIp(req), 60, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít phút' });
+      }
       if (!isOwner(req)) return sendJson(res, 401, { error: 'Sai mã chủ game (header x-owner-key)' });
       if (req.method === 'POST') {
         const body = await readBody(req);
@@ -759,6 +854,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/withdraw') {
       const body = await readBody(req);
       if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      if (!requestAuthorizedFor(req, String(body.playerId))) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
       const save = getOrCreatePlayer(String(body.playerId), now);
       const gold = Math.floor(body.gold);
       const method = String(body.method || '');
@@ -802,6 +900,9 @@ const server = http.createServer(async (req, res) => {
       // Không có playerId nghĩa là đang đòi xem TOÀN BỘ đơn — việc đó chỉ dành
       // cho chủ game (đã xử lý ở nhánh owner phía trên) nên trả 401.
       if (!playerId) return sendJson(res, 401, { error: 'Thiếu playerId (xem toàn bộ đơn cần mã chủ game)' });
+      if (!requestAuthorizedFor(req, String(playerId))) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
       return sendJson(res, 200, { withdrawals: data.withdrawals.filter((w) => w.playerId === String(playerId)).map(publicWithdrawal) });
     }
 
@@ -810,6 +911,9 @@ const server = http.createServer(async (req, res) => {
      * và HOÀN LẠI đúng số vàng của đơn vào số dư người chơi. Chỉ xử lý được đơn
      * đang chờ (pending); đơn đã xử lý rồi thì báo lỗi rõ ràng. */
     if (req.method === 'POST' && url.pathname === '/api/withdrawals/update') {
+      if (rateLimited('owner:' + clientIp(req), 60, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít phút' });
+      }
       if (!isOwner(req)) return sendJson(res, 401, { error: 'Sai mã chủ game (header x-owner-key)' });
       const body = await readBody(req);
       const id = String(body.id || '');
@@ -846,6 +950,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/referral') {
       const body = await readBody(req);
       if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      if (!requestAuthorizedFor(req, String(body.playerId))) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
       const me = getOrCreatePlayer(String(body.playerId), now);
       const code = String(body.code || '').trim().toUpperCase();
       if (!code) return sendJson(res, 400, { error: 'Hãy nhập mã giới thiệu của bạn bè' });
@@ -900,6 +1007,12 @@ const server = http.createServer(async (req, res) => {
       let filePath = url.pathname === '/' ? '/index.html' : url.pathname;
       filePath = path.normalize(path.join(PUBLIC_DIR, filePath));
       if (!filePath.startsWith(PUBLIC_DIR)) { res.writeHead(403); return res.end('Forbidden'); }
+      // Không phục vụ file nhạy cảm (mã nguồn server, dữ liệu, cấu hình, thư
+      // mục ẩn) kể cả khi PUBLIC_DIR lùi về thư mục gốc của repo (vá 2026-11-24).
+      const baseName = path.basename(filePath);
+      if (baseName === 'server.js' || baseName === 'data.json' || baseName.startsWith('package') || baseName.startsWith('.') || filePath.includes(path.sep + '.')) {
+        res.writeHead(404); return res.end('Not found');
+      }
       fs.stat(filePath, (err, st) => {
         if (err || !st.isFile()) { res.writeHead(404); return res.end('Not found'); }
         // Chống cache cũ: trình duyệt luôn hỏi lại server (ETag) — file chưa đổi
