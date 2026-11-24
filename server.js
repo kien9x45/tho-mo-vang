@@ -32,6 +32,8 @@ const OFFLINE_CAP_SECONDS = 6 * 3600; // trần offline 6 giờ (giảm từ 8 g
 const OFFLINE_RATE = 0.25;          // offline = 25% tốc độ thường
 const REFERRAL_REWARD = { gold: 25000, gems: 500 }; // quà NGAY cho người được mời khi ghi nhận ref (làm lại 2026-11-24: nặng KC vì KC không rút thành tiền được)
 const REFERRAL_INVITER_REWARD = { gold: 2000, gems: 50 }; // quà NGAY cho người mời khi bạn mới ghi nhận ref
+const CHANNEL_ID = '@ThoMoVangOfficial'; // kênh Telegram chính thức (phát mã quà mỗi ngày)
+const CHANNEL_REWARD = { gold: 10000, gems: 200 }; // thưởng nhiệm vụ tham gia kênh — nhận 1 lần, server kiểm chứng thành viên thật qua Bot API (getChatMember; bot phải là admin của kênh)
 const REFERRAL_MILESTONE_EARNED = 100000; // cửa sổ "tài khoản còn mới" + mốc tính BẠN CHĂM (tier 1)
 // 3 mốc thưởng cho người mời theo tổng đào tích lũy của TỪNG người được mời
 // (làm lại 2026-11-24, thay mốc đơn 100.000 cũ): trả dần khi bạn càng chăm.
@@ -335,6 +337,7 @@ function newSave(playerId, now) {
     referredBy: null,
     refMilestoneDone: false, // (cũ) đã trả thưởng mốc 100.000 kiểu cũ chưa — giữ để di trú
     refTiersPaid: 0,          // số tier thưởng ref đã trả cho người giới thiệu nhờ player này (0..3)
+    channelClaimed: false,    // đã nhận thưởng nhiệm vụ tham gia kênh chưa (server là nguồn sự thật, client không khai được)
     _burst: 15000,            // ngân sách chống gian lận còn lại (xem POST /api/save)
     _burstGems: 2000,         // ngân sách KC theo thời gian (vá 2026-11-24)
     friendsCount: 0,
@@ -1026,6 +1029,56 @@ const server = http.createServer(async (req, res) => {
         refInfo: refInfoOf(me),
         referredByCode: inviter.referralCode,
       });
+    }
+
+    /* ---- POST /api/channel-claim {playerId} ----
+     * Nhiệm vụ "Tham gia kênh": server kiểm chứng người chơi CÓ THẬT là thành
+     * viên kênh @ThoMoVangOfficial qua Bot API getChatMember (bot phải được
+     * thêm làm admin của kênh thì mới tra được), rồi mới cộng thưởng 1 lần.
+     * Chưa tham gia -> 200 {joined:false} (không phải lỗi). Không tra được
+     * (bot chưa làm admin / Telegram lỗi) -> 503, không kết luận oan. */
+    if (req.method === 'POST' && url.pathname === '/api/channel-claim') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (!playerId.startsWith('tg_')) {
+        return sendJson(res, 400, { error: 'Hãy mở game trong Telegram để làm nhiệm vụ này' });
+      }
+      if (rateLimited('channel:' + playerId, 15, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      if (!BOT_TOKEN) {
+        return sendJson(res, 503, { error: 'Tính năng tạm thời chưa sẵn sàng, thử lại sau' });
+      }
+      const me = getOrCreatePlayer(playerId, now);
+      if (me.channelClaimed) {
+        return sendJson(res, 400, { error: 'Bạn đã nhận thưởng nhiệm vụ này rồi' });
+      }
+      const userId = Number(playerId.slice(3));
+      if (!Number.isFinite(userId) || userId <= 0) {
+        return sendJson(res, 400, { error: 'Không xác định được tài khoản Telegram' });
+      }
+      let resp = null;
+      try {
+        resp = await telegramApi('getChatMember', { chat_id: CHANNEL_ID, user_id: userId });
+      } catch { resp = null; }
+      if (!resp || resp.ok !== true || !resp.result) {
+        return sendJson(res, 503, { error: 'Chưa kiểm tra được, vui lòng thử lại sau ít phút' });
+      }
+      const st = resp.result.status;
+      const joined = st === 'creator' || st === 'administrator' || st === 'member'
+        || (st === 'restricted' && resp.result.is_member === true);
+      if (!joined) return sendJson(res, 200, { joined: false });
+      me.gold += CHANNEL_REWARD.gold;
+      me.gems += CHANNEL_REWARD.gems;
+      me.channelClaimed = true;
+      me._clientGold = me.gold; me._clientGems = me.gems; // client nhận số dư mới trong đáp, gộp delta giữ khoản cộng này
+      me._lastSync = now; me.lastSeen = now;
+      await persist();
+      return sendJson(res, 200, { joined: true, save: me, reward: CHANNEL_REWARD });
     }
 
     /* ---- POST /api/telegram-webhook (Bot Telegram: chào khi /start) ---- */
