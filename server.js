@@ -388,6 +388,7 @@ function newSave(playerId, now) {
     lastSeen: now,
     createdAt: now,
     referralCode: makeReferralCode(playerId),
+    displayName: '',          // tên hiển thị trên bảng xếp hạng (client gửi kèm tên Telegram khi lưu)
     referredBy: null,
     refMilestoneDone: false, // (cũ) đã trả thưởng mốc 100.000 kiểu cũ chưa — giữ để di trú
     refTiersPaid: 0,          // số tier thưởng ref đã trả cho người giới thiệu nhờ player này (0..3)
@@ -659,6 +660,13 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
       }
       const save = getOrCreatePlayer(String(playerId), now);
+      // Tên hiển thị cho bảng xếp hạng: client gửi kèm tên Telegram của
+      // chính người chơi (chỉ là trang trí) — gọt ký tự điều khiển/xuống
+      // dòng, gộp khoảng trắng, cắt tối đa 40 ký tự.
+      if (typeof body.displayName === 'string') {
+        const dn = body.displayName.replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+        if (dn) save.displayName = dn;
+      }
       const inc = body.save || {};
 
       // Kiểm tra hợp lý: mọi số phải hữu hạn và không âm
@@ -1170,6 +1178,38 @@ const server = http.createServer(async (req, res) => {
       me._lastSync = now; me.lastSeen = now;
       await persist();
       return sendJson(res, 200, { save: me, reward, playerLevel: myLevel });
+    }
+
+    /* ---- GET /api/leaderboard?playerId= ----
+     * Bảng xếp hạng theo TỔNG VÀNG ĐÀO (totalEarned — con số server đã gác
+     * bằng cơ chế chống gian lận ở POST /api/save). Trả Top 50 + hạng của
+     * chính người hỏi. Chỉ lộ tên hiển thị + cấp + tổng vàng: KHÔNG trả
+     * playerId, username hay ID Telegram của bất kỳ ai. */
+    if (req.method === 'GET' && url.pathname === '/api/leaderboard') {
+      const pid = url.searchParams.get('playerId') || '';
+      if (pid && !requestAuthorizedFor(req, pid)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('lb:' + clientIp(req), 60, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const ranked = Object.values(data.players)
+        .filter((p) => p && Number(p.totalEarned) > 0)
+        .sort((a, b) => (b.totalEarned - a.totalEarned) || ((a.createdAt || 0) - (b.createdAt || 0)));
+      const pub = (p, rank) => ({
+        rank,
+        name: (typeof p.displayName === 'string' && p.displayName) || ('Thợ mỏ #' + String(p.referralCode || p.playerId || '????').slice(-4).toUpperCase()),
+        level: playerLevelOf(p.totalEarned),
+        totalEarned: Math.floor(p.totalEarned),
+        me: !!pid && p.playerId === pid,
+      });
+      const top = ranked.slice(0, 50).map((p, i) => pub(p, i + 1));
+      let own = null;
+      if (pid) {
+        const idx = ranked.findIndex((p) => p.playerId === pid);
+        if (idx >= 0) own = pub(ranked[idx], idx + 1);
+      }
+      return sendJson(res, 200, { top, own, total: ranked.length });
     }
 
     /* ---- POST /api/telegram-webhook (Bot Telegram: chào khi /start) ---- */
