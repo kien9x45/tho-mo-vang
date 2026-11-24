@@ -34,6 +34,31 @@ const REFERRAL_REWARD = { gold: 25000, gems: 500 }; // quà NGAY cho người đ
 const REFERRAL_INVITER_REWARD = { gold: 2000, gems: 50 }; // quà NGAY cho người mời khi bạn mới ghi nhận ref
 const CHANNEL_ID = '@ThoMoVangOfficial'; // kênh Telegram chính thức (phát mã quà mỗi ngày)
 const CHANNEL_REWARD = { gold: 10000, gems: 200 }; // thưởng nhiệm vụ tham gia kênh — nhận 1 lần, server kiểm chứng thành viên thật qua Bot API (getChatMember; bot phải là admin của kênh)
+/* ---- Cấp độ NGƯỜI CHƠI (khác cấp thợ mua bằng KC): theo TỔNG VÀNG ĐÀO tích
+ * lũy (totalEarned — server đã kẹp chống gian lận), cấp 1..50. Ngưỡng đạt
+ * cấp n (n>=2) = làm tròn nghìn của 2500 x (n-1)^2.6: cấp 10 ~777.000,
+ * cấp 20 ~5,3tr, cấp 30 ~15,7tr, cấp 40 ~34tr, cấp 50 ~62tr tổng đào.
+ * CÔNG THỨC NÀY PHẢI GIỐNG HỆT phía client (api.ts: levelThreshold). ---- */
+const PLAYER_LEVEL_MAX = 50;
+function levelThreshold(n) {
+  return Math.round(2500 * Math.pow(n - 1, 2.6) / 1000) * 1000;
+}
+function playerLevelOf(totalEarned) {
+  const te = Number(totalEarned) || 0;
+  let lv = 1;
+  for (let n = 2; n <= PLAYER_LEVEL_MAX; n++) {
+    if (te >= levelThreshold(n)) lv = n; else break;
+  }
+  return lv;
+}
+// Thưởng MỐC mỗi 10 cấp — nhận 1 lần, server kiểm chứng cấp thật rồi mới trả.
+const LEVEL_MILESTONE_REWARDS = {
+  10: { gold: 25000, gems: 300 },
+  20: { gold: 75000, gems: 600 },
+  30: { gold: 200000, gems: 1000 },
+  40: { gold: 500000, gems: 1500 },
+  50: { gold: 1500000, gems: 3000 },
+};
 const REFERRAL_MILESTONE_EARNED = 100000; // cửa sổ "tài khoản còn mới" + mốc tính BẠN CHĂM (tier 1)
 // 3 mốc thưởng cho người mời theo tổng đào tích lũy của TỪNG người được mời
 // (làm lại 2026-11-24, thay mốc đơn 100.000 cũ): trả dần khi bạn càng chăm.
@@ -367,6 +392,7 @@ function newSave(playerId, now) {
     refMilestoneDone: false, // (cũ) đã trả thưởng mốc 100.000 kiểu cũ chưa — giữ để di trú
     refTiersPaid: 0,          // số tier thưởng ref đã trả cho người giới thiệu nhờ player này (0..3)
     channelClaimed: false,    // đã nhận thưởng nhiệm vụ tham gia kênh chưa (server là nguồn sự thật, client không khai được)
+    levelClaims: [],          // các mốc cấp người chơi đã nhận thưởng (vd [10, 20]) — server là nguồn sự thật
     _burst: 15000,            // ngân sách chống gian lận còn lại (xem POST /api/save)
     _burstGems: 2000,         // ngân sách KC theo thời gian (vá 2026-11-24)
     friendsCount: 0,
@@ -1108,6 +1134,42 @@ const server = http.createServer(async (req, res) => {
       me._lastSync = now; me.lastSeen = now;
       await persist();
       return sendJson(res, 200, { joined: true, save: me, reward: CHANNEL_REWARD });
+    }
+
+    /* ---- POST /api/level-claim {playerId, level} ----
+     * Nhận thưởng MỐC CẤP người chơi (10/20/30/40/50): server tự tính cấp
+     * thật từ totalEarned của chính mình (không tin client khai), mốc phải
+     * có thưởng, cấp phải đạt, và mỗi mốc chỉ nhận 1 lần (levelClaims). */
+    if (req.method === 'POST' && url.pathname === '/api/level-claim') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('level:' + playerId, 15, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const level = Math.floor(Number(body.level));
+      const reward = LEVEL_MILESTONE_REWARDS[level];
+      if (!reward) return sendJson(res, 400, { error: 'Mốc cấp không hợp lệ' });
+      const me = getOrCreatePlayer(playerId, now);
+      if (!Array.isArray(me.levelClaims)) me.levelClaims = [];
+      if (me.levelClaims.includes(level)) {
+        return sendJson(res, 400, { error: 'Bạn đã nhận thưởng mốc cấp này rồi' });
+      }
+      const myLevel = playerLevelOf(me.totalEarned);
+      if (myLevel < level) {
+        return sendJson(res, 400, { error: `Bạn mới cấp ${myLevel} — đạt cấp ${level} mới nhận được mốc này` });
+      }
+      me.gold += reward.gold;
+      me.gems += reward.gems;
+      me.levelClaims.push(level);
+      me.levelClaims.sort((a, b) => a - b);
+      me._clientGold = me.gold; me._clientGems = me.gems; // client nhận số dư mới trong đáp, gộp delta giữ khoản cộng này
+      me._lastSync = now; me.lastSeen = now;
+      await persist();
+      return sendJson(res, 200, { save: me, reward, playerLevel: myLevel });
     }
 
     /* ---- POST /api/telegram-webhook (Bot Telegram: chào khi /start) ---- */
