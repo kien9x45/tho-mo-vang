@@ -95,8 +95,37 @@ async function telegramApi(method, payload) {
   return r.json().catch(() => ({}));
 }
 
-async function sendWelcome(chatId, startPayload) {
+function fmtVN(n) {
+  return String(Math.floor(Math.max(0, Number(n) || 0))).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+}
+
+// Lời chào /start kèm THÔNG TIN NGƯỜI CHƠI (Kien yêu cầu 2026-11-25, giống
+// các bot game khác): tên + @username + ID lấy từ chính tin nhắn Telegram
+// gửi tới (msg.from, không cần xin quyền gì thêm); nếu người chơi đã có
+// tài khoản game thì kèm số liệu thật của họ (cấp, vàng, KC, ngày tham gia,
+// mã giới thiệu), chưa có thì nhắc quà tân thủ.
+function welcomeTextFor(from, chatId) {
+  const lines = [WELCOME_TEXT, '', '👤 Thông tin của bạn:'];
+  const name = [from && from.first_name, from && from.last_name].filter(Boolean).join(' ').trim();
+  if (name) lines.push('• Tên: ' + name);
+  if (from && from.username) lines.push('• Username: @' + from.username);
+  lines.push('• ID Telegram: ' + chatId);
+  const p = data.players['tg_' + chatId];
+  if (p) {
+    lines.push('• Cấp thợ: ' + (p.minerLevel || 1) + ' · Vàng: ' + fmtVN(p.gold) + ' · Kim cương: ' + fmtVN(p.gems));
+    if (p.createdAt) {
+      lines.push('• Tham gia: ' + new Date(p.createdAt).toLocaleDateString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }));
+    }
+    if (p.referralCode) lines.push('• Mã giới thiệu: ' + p.referralCode);
+  } else {
+    lines.push('• Bấm ⛏ Chơi Game để bắt đầu đào — tân thủ nhận ngay 50.000 vàng + 1.500 KC!');
+  }
+  return lines.join('\n');
+}
+
+async function sendWelcome(chatId, startPayload, from) {
   const gameUrl = startPayload ? GAME_URL + '/?startapp=' + encodeURIComponent(startPayload) : GAME_URL;
+  const text = welcomeTextFor(from, chatId);
   const replyMarkup = {
     inline_keyboard: [
       [{ text: '⛏ Chơi Game', web_app: { url: gameUrl } }],
@@ -110,13 +139,13 @@ async function sendWelcome(chatId, startPayload) {
   const photo = await telegramApi('sendPhoto', {
     chat_id: chatId,
     photo: GAME_URL + '/banner-welcome.jpg',
-    caption: WELCOME_TEXT,
+    caption: text,
     reply_markup: replyMarkup,
   });
   if (photo && photo.ok) return;
   await telegramApi('sendMessage', {
     chat_id: chatId,
-    text: WELCOME_TEXT,
+    text,
     reply_markup: replyMarkup,
   });
 }
@@ -1091,7 +1120,7 @@ const server = http.createServer(async (req, res) => {
       const msg = update && update.message;
       if (msg && msg.chat && msg.chat.type === 'private' && typeof msg.text === 'string' && msg.text.startsWith('/start')) {
         const payload = msg.text.slice('/start'.length).trim().split(/\s+/)[0] || '';
-        try { await sendWelcome(msg.chat.id, payload); } catch (e) { console.error('Telegram sendMessage lỗi:', e.message); }
+        try { await sendWelcome(msg.chat.id, payload, msg.from); } catch (e) { console.error('Telegram sendMessage lỗi:', e.message); }
       }
       return sendJson(res, 200, { ok: true });
     }
