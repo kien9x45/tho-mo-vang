@@ -163,6 +163,7 @@ function islandStateOf(p) {
   if (!Array.isArray(p.island.buildings) || p.island.buildings.length !== ISLAND_BUILDINGS.length) p.island.buildings = [0, 0, 0, 0, 0];
   p.island.buildings = p.island.buildings.map((v) => Math.max(0, Math.min(ISLAND_MAX_LEVEL, Math.floor(Number(v) || 0))));
   if (!Array.isArray(p.island.log)) p.island.log = [];
+  if (!p.island.week || typeof p.island.week !== 'object') p.island.week = { key: '', score: 0, at: 0 };
   return p.island;
 }
 function islandTotalLevels(p) {
@@ -203,6 +204,66 @@ function islandInfoFor(p, now) {
   };
 }
 function fmtGoldVN(n) { return String(Math.floor(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
+
+/* ---- ĐUA TOP ĐẢO TUẦN ----
+ * Điểm đua = số cấp công trình xây TRONG tuần (tuần tính từ 00:00 thứ Hai
+ * giờ VN) — cá voi nằm ì ở đảo cao vẫn thua người chăm xây tuần này. Sang
+ * tuần mới, yêu cầu đảo đầu tiên sẽ CHỐT SỔ tuần cũ và tự trả thưởng cho
+ * Top 10 (server ngủ khi rảnh nên không hẹn giờ nửa đêm được; chốt bằng
+ * dữ liệu đã lưu tại thời điểm chốt — chỉ lệch vài phút đầu tuần). */
+const ISLAND_RACE_PRIZES = [
+  { gold: 400000, gems: 4000 },  // Top 1 — đã gấp đôi theo chốt của chủ game 2026-11-26
+  { gold: 300000, gems: 3000 },  // Top 2
+  { gold: 200000, gems: 2000 },  // Top 3
+  { gold: 100000, gems: 1000 },  // Top 4–10
+];
+function islandRacePrizeFor(rank) {
+  if (rank < 1 || rank > 10) return null;
+  return ISLAND_RACE_PRIZES[Math.min(rank, 4) - 1];
+}
+function weekMondayOf(now) { // {key: 'YYYY-MM-DD' của thứ Hai, endsAt: ms lúc tuần kết thúc}
+  const d = new Date(now + 7 * 3600e3);
+  const daysSinceMonday = (d.getUTCDay() + 6) % 7;
+  const monday = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - daysSinceMonday * 86400e3;
+  return { key: new Date(monday).toISOString().slice(0, 10), endsAt: monday - 7 * 3600e3 + 7 * 86400e3 };
+}
+function islandWeekOf(p, now) { // điểm đua tuần của người chơi (tự lăn sang tuần mới)
+  const isl = islandStateOf(p);
+  const { key } = weekMondayOf(now);
+  if (isl.week.key !== key) isl.week = { key, score: 0, at: 0 };
+  return isl.week;
+}
+function raceRowsFor(weekKey) { // bảng điểm 1 tuần từ dữ liệu thô đã lưu (không lăn tuần của ai)
+  const rows = [];
+  for (const p of Object.values(data.players)) {
+    const w = p && p.island && typeof p.island === 'object' ? p.island.week : null;
+    if (!w || w.key !== weekKey || !(Number(w.score) > 0)) continue;
+    rows.push({ playerId: p.playerId, name: playerDisplayName(p), islandNo: islandStateOf(p).no, score: Math.floor(w.score), at: Number(w.at) || 0, totalLevels: islandTotalLevels(p) });
+  }
+  rows.sort((a, b) => (b.score - a.score) || (a.at - b.at) || (b.islandNo - a.islandNo) || (b.totalLevels - a.totalLevels));
+  return rows;
+}
+async function settleIslandRaceIfNeeded(now) {
+  const { key: currentKey } = weekMondayOf(now);
+  if (!data.islandRace || typeof data.islandRace !== 'object') {
+    data.islandRace = { weekKey: currentKey, last: null };
+    return;
+  }
+  if (data.islandRace.weekKey === currentKey) return;
+  const settledKey = data.islandRace.weekKey;
+  const winners = raceRowsFor(settledKey).slice(0, 10).map((r, i) => {
+    const prize = islandRacePrizeFor(i + 1);
+    const p = data.players[r.playerId];
+    if (p && prize) {
+      p.gold = (p.gold || 0) + prize.gold;
+      p.gems = (p.gems || 0) + prize.gems;
+      p._clientGold = p.gold; p._clientGems = p.gems; // đồng bộ delta cho client của người thắng
+    }
+    return { rank: i + 1, name: r.name, islandNo: r.islandNo, score: r.score, gold: prize ? prize.gold : 0, gems: prize ? prize.gems : 0 };
+  });
+  data.islandRace = { weekKey: currentKey, last: { weekKey: settledKey, winners } };
+  await persist();
+}
 
 // Thưởng MỐC mỗi 10 cấp — nhận 1 lần, server kiểm chứng cấp thật rồi mới trả.
 const LEVEL_MILESTONE_REWARDS = {
@@ -549,7 +610,7 @@ function newSave(playerId, now) {
     levelClaims: [],          // các mốc cấp người chơi đã nhận thưởng (vd [10, 20]) — server là nguồn sự thật
     raid: { date: '', used: 0, shieldUntil: 0, pending: null, log: [] }, // PvP đột kích: lượt/ngày, khiên, đối thủ đang nhắm, nhật ký — server là nguồn sự thật
     lastAdChestAt: 0,         // mốc mở rương vàng ads gần nhất (ms) — cooldown phía server, client không khai được
-    island: { no: 1, buildings: [0, 0, 0, 0, 0], log: [] }, // Đảo Vàng: số đảo + cấp 5 công trình + nhật ký — server là nguồn sự thật
+    island: { no: 1, buildings: [0, 0, 0, 0, 0], log: [], week: { key: '', score: 0, at: 0 } }, // Đảo Vàng: số đảo + cấp 5 công trình + nhật ký + điểm đua tuần — server là nguồn sự thật
     wheel: { date: '', spins: 0, adUsed: 0 }, // Vòng quay: ngày VN, lượt quay đang có, lượt ads đã dùng hôm nay — server là nguồn sự thật
     _burst: 15000,            // ngân sách chống gian lận còn lại (xem POST /api/save)
     _burstGems: 2000,         // ngân sách KC theo thời gian (vá 2026-11-24)
@@ -1535,6 +1596,7 @@ const server = http.createServer(async (req, res) => {
       if (rateLimited('island:' + clientIp(req), 60, 60000)) {
         return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
       }
+      await settleIslandRaceIfNeeded(now); // chốt sổ đua top tuần cũ nếu vừa sang tuần mới
       const me = getOrCreatePlayer(playerId, now);
       const { rolled } = wheelStateOf(me, now);
       islandStateOf(me);
@@ -1555,6 +1617,7 @@ const server = http.createServer(async (req, res) => {
       if (rateLimited('wheel:' + playerId, 15, 60000)) {
         return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
       }
+      await settleIslandRaceIfNeeded(now); // chốt sổ đua top tuần cũ nếu vừa sang tuần mới
       const me = getOrCreatePlayer(playerId, now);
       const { wheel } = wheelStateOf(me, now);
       if (wheel.adUsed >= WHEEL_AD_SPINS_MAX) {
@@ -1584,6 +1647,7 @@ const server = http.createServer(async (req, res) => {
       if (rateLimited('wheel:' + playerId, 30, 60000)) {
         return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
       }
+      await settleIslandRaceIfNeeded(now); // chốt sổ đua top tuần cũ nếu vừa sang tuần mới
       const me = getOrCreatePlayer(playerId, now);
       const { wheel } = wheelStateOf(me, now);
       if (wheel.spins <= 0) {
@@ -1700,6 +1764,7 @@ const server = http.createServer(async (req, res) => {
       if (!(b >= 0 && b < ISLAND_BUILDINGS.length)) {
         return sendJson(res, 400, { error: 'Công trình không hợp lệ' });
       }
+      await settleIslandRaceIfNeeded(now); // chốt sổ đua top tuần cũ nếu vừa sang tuần mới
       const me = getOrCreatePlayer(playerId, now);
       const isl = islandStateOf(me);
       const lvl = isl.buildings[b];
@@ -1712,6 +1777,8 @@ const server = http.createServer(async (req, res) => {
       }
       me.gold -= cost;
       isl.buildings[b] = lvl + 1;
+      const wkRace = islandWeekOf(me, now); // +1 điểm Đua Top Đảo cho tuần này
+      wkRace.score += 1; wkRace.at = now;
       let completed = false;
       let reward = null;
       if (isl.buildings.every((v) => v >= ISLAND_MAX_LEVEL)) {
@@ -1730,6 +1797,36 @@ const server = http.createServer(async (req, res) => {
         ok: true, cost, completed, reward,
         gold: me.gold, gems: me.gems,
         island: islandInfoFor(me, now),
+      });
+    }
+
+    /* ---- GET /api/island/race?playerId= ----
+     * Bảng Đua Top Đảo tuần này: điểm = số cấp công trình đã xây trong
+     * tuần (từ 00:00 thứ Hai giờ VN), Top 10 + hạng của mình + danh sách
+     * quán quân tuần trước. Lần gọi đầu tiên của tuần mới chốt sổ và trả
+     * thưởng tuần cũ trước (settleIslandRaceIfNeeded). */
+    if (req.method === 'GET' && url.pathname === '/api/island/race') {
+      const playerId = String(url.searchParams.get('playerId') || '');
+      if (!playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('island:' + clientIp(req), 60, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      await settleIslandRaceIfNeeded(now);
+      const { key, endsAt } = weekMondayOf(now);
+      const rows = raceRowsFor(key);
+      const pub = (r, i) => ({ rank: i + 1, name: r.name, islandNo: r.islandNo, score: r.score, me: r.playerId === playerId });
+      const myIdx = rows.findIndex((r) => r.playerId === playerId);
+      return sendJson(res, 200, {
+        weekKey: key,
+        endsAt,
+        prizes: [1, 2, 3, 4].map((r) => ({ rank: r, gold: islandRacePrizeFor(r).gold, gems: islandRacePrizeFor(r).gems })),
+        top: rows.slice(0, 10).map(pub),
+        own: myIdx >= 0 ? pub(rows[myIdx], myIdx) : null,
+        total: rows.length,
+        lastWeek: data.islandRace && data.islandRace.last ? data.islandRace.last : null,
       });
     }
 
