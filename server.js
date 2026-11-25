@@ -23,7 +23,7 @@ const START_GOLD = 50000;           // quà tân thủ (giảm từ 300.000 — 
 const START_GEMS = 1500;            // quà tân thủ
 const BASE_RATE = 1.9;              // Lv.1 = 1.9 + 0.1*1 = 2.0 vàng/giây (giảm từ 6.0 — cân bằng lại 2026-11-24)
 const RATE_PER_LEVEL = 0.1;
-const UPGRADE_COST_GEMS = 5000;     // nâng cấp thợ: phẳng 5.000 KC/cấp (client hiển thị, trừ KC qua /api/save có kiểm tra)
+const UPGRADE_COST_GEMS = 2000;     // nâng cấp thợ: phẳng 2.000 KC/cấp (giảm từ 5.000 ngày 2026-11-25 cho khớp kinh tế sau cân bằng; client hiển thị, trừ KC qua /api/save có kiểm tra)
 const EXCHANGE_RATE = 125;          // 125 vàng = 1 kim cương (một chiều vàng -> KC)
 const WITHDRAW_RATE = 0.0005;       // 1 vàng = 0,0005 VNĐ
 const WITHDRAW_MIN_GOLD = 4000000;  // tối thiểu 4.000.000 vàng
