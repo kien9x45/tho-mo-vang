@@ -147,12 +147,12 @@ const WHEEL_SEGMENTS = [
   { key: 'jackpot', weight: 3 },
 ];
 const ISLAND_BUILDINGS = [
-  { name: 'Mỏ Vàng Chính', base: 10000 },
-  { name: 'Lán Trại Thợ Mỏ', base: 20000 },
-  { name: 'Xưởng Luyện Vàng', base: 30000 },
-  { name: 'Tháp Canh', base: 45000 },
-  { name: 'Bến Tàu Vàng', base: 70000 },
-]; // giá gốc giảm 50% từ 2026-11-26 (chủ game chốt): đảo 1 trọn gói ~2,625tr thay vì ~4,875tr
+  { name: 'Mỏ Vàng Chính', base: 5000 },
+  { name: 'Lán Trại Thợ Mỏ', base: 10000 },
+  { name: 'Xưởng Luyện Vàng', base: 15000 },
+  { name: 'Tháp Canh', base: 23000 },
+  { name: 'Bến Tàu Vàng', base: 35000 },
+]; // giảm giá 2 đợt -50% ngày 2026-11-26 (chủ game chốt): đảo 1 trọn gói ~1,32tr (gốc ~4,875tr)
 const ISLAND_MAX_LEVEL = 5;
 function islandCost(no, b, level) { // giá nâng công trình b từ `level` lên level+1 ở đảo `no`
   return Math.round(ISLAND_BUILDINGS[b].base * (level + 1) * Math.pow(3.5, no - 1) / 1000) * 1000;
