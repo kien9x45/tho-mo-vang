@@ -63,6 +63,7 @@ function vnDateOf(now) { return new Date(now + 7 * 3600e3).toISOString().slice(0
 function raidStateOf(p, now) {
   if (!p.raid || typeof p.raid !== 'object') p.raid = { date: '', used: 0, shieldUntil: 0, pending: null, log: [] };
   if (!Array.isArray(p.raid.log)) p.raid.log = [];
+  if (!p.raid.stats || typeof p.raid.stats !== 'object') p.raid.stats = { atk: 0, atkWin: 0, stolen: 0, def: 0, defWin: 0, lost: 0, rev: 0, revWin: 0 };
   const today = vnDateOf(now);
   if (p.raid.date !== today) { p.raid.date = today; p.raid.used = 0; }
   return p.raid;
@@ -94,6 +95,7 @@ function raidInfoFor(p, now) {
     shieldUntil: r.shieldUntil || 0,
     shieldActive: (r.shieldUntil || 0) > now,
     log: publicRaidLog(p, now),
+    stats: { ...r.stats }, // thành tích PvP trọn đời (cho bảng Chỉ số nhân vật)
   };
 }
 // Tung xúc xắc 1 trận: điểm tấn công = sản lượng 10 giây + chạm x sức chạm;
@@ -1340,6 +1342,9 @@ const server = http.createServer(async (req, res) => {
       }
       myRaid.used += 1;
       const { win, steal } = resolveRaid(me, target, body.taps, now);
+      myRaid.stats.atk += 1; tRaid.stats.def += 1;
+      if (win) { myRaid.stats.atkWin += 1; myRaid.stats.stolen += steal; tRaid.stats.lost += steal; }
+      else { tRaid.stats.defWin += 1; }
       const entryId = now.toString(36) + Math.random().toString(36).slice(2, 7);
       if (win) {
         target.gold -= steal;
@@ -1378,6 +1383,9 @@ const server = http.createServer(async (req, res) => {
       }
       entry.revengeUsed = true; // phản công xuyên khiên, không tốn lượt ngày, mỗi vụ chỉ 1 lần
       const { win, steal } = resolveRaid(me, target, body.taps, now);
+      myRaid.stats.rev += 1; tRaid.stats.def += 1;
+      if (win) { myRaid.stats.revWin += 1; myRaid.stats.stolen += steal; tRaid.stats.lost += steal; }
+      else { tRaid.stats.defWin += 1; }
       if (win) {
         target.gold -= steal;
         me.gold += steal;
