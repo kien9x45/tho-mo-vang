@@ -327,7 +327,7 @@ const MINER_CHECK_PRICES = { tap_su: 45, lanh_nghe: 300, doi_dao: 3300, may_khoa
 // Hai loại thợ chỉ có phía client (đóng gói trong extras __tmv): giá + gps hiện tại.
 const EXTRA_MINERS = {
   robot: { baseCost: 60000000, gps: 1000 },
-  mo_tu_dong: { baseCost: 990000000, gps: 5312.5 },
+  mo_tu_dong: { baseCost: 300000000, gps: 5312.5 }, // giá giảm 990tr -> 300tr theo yêu cầu Kien 2026-11-25
 };
 // Tổng giá hình học (không làm tròn từng con) để kiểm tra khả năng chi trả.
 function seriesCost(base, from, to) {
