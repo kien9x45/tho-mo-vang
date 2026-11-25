@@ -124,6 +124,86 @@ function resolveRaid(attacker, target, tapsRaw) {
   }
   return { win, steal, prob };
 }
+/* ---------------- ĐẢO VÀNG + VÒNG QUAY (mini game kiểu Pirate Kings) ----------------
+ * Vòng quay do SERVER tung (client chỉ chạy hoạt ảnh theo ô server trả),
+ * lượt quay giới hạn theo ngày; vàng thưởng theo gps thật + trần như rương
+ * ads. Xây đảo là BỂ CHỨA VÀNG: 5 công trình x 5 cấp, xong đảo n thì qua
+ * đảo n+1 với giá x3,5 — vàng tiêu vào đảo cạnh tranh với rút tiền. Ô "Cướp
+ * vàng" dùng chung luật đột kích (log + quyền phản công + khiên nạn nhân);
+ * ô "Phá đảo" trừ 1 cấp công trình của đối thủ — khiên đột kích chặn cả hai. */
+const WHEEL_FREE_SPINS = 3;        // lượt quay free cấp mỗi ngày (giờ VN)
+const WHEEL_AD_SPINS_MAX = 5;      // tối đa lượt quay kiếm thêm bằng ads mỗi ngày
+const WHEEL_SPIN_CAP = 20;         // trần lượt quay tích lũy được
+// Thứ tự ô trên vòng quay — client (App.tsx WHEEL_SEGMENTS) PHẢI giữ đúng thứ tự này.
+const WHEEL_SEGMENTS = [
+  { key: 'gold_small', weight: 26 },
+  { key: 'shield', weight: 12 },
+  { key: 'gems_30', weight: 14 },
+  { key: 'steal', weight: 11 },
+  { key: 'gold_big', weight: 12 },
+  { key: 'raid_ticket', weight: 10 },
+  { key: 'attack', weight: 7 },
+  { key: 'gems_100', weight: 5 },
+  { key: 'jackpot', weight: 3 },
+];
+const ISLAND_BUILDINGS = [
+  { name: 'Mỏ Vàng Chính', base: 20000 },
+  { name: 'Lán Trại Thợ Mỏ', base: 35000 },
+  { name: 'Xưởng Luyện Vàng', base: 55000 },
+  { name: 'Tháp Canh', base: 85000 },
+  { name: 'Bến Tàu Vàng', base: 130000 },
+];
+const ISLAND_MAX_LEVEL = 5;
+function islandCost(no, b, level) { // giá nâng công trình b từ `level` lên level+1 ở đảo `no`
+  return Math.round(ISLAND_BUILDINGS[b].base * (level + 1) * Math.pow(3.5, no - 1) / 1000) * 1000;
+}
+function islandStateOf(p) {
+  if (!p.island || typeof p.island !== 'object') p.island = { no: 1, buildings: [0, 0, 0, 0, 0], log: [] };
+  if (!Number.isFinite(p.island.no) || p.island.no < 1) p.island.no = 1;
+  if (!Array.isArray(p.island.buildings) || p.island.buildings.length !== ISLAND_BUILDINGS.length) p.island.buildings = [0, 0, 0, 0, 0];
+  p.island.buildings = p.island.buildings.map((v) => Math.max(0, Math.min(ISLAND_MAX_LEVEL, Math.floor(Number(v) || 0))));
+  if (!Array.isArray(p.island.log)) p.island.log = [];
+  return p.island;
+}
+function islandTotalLevels(p) {
+  return islandStateOf(p).buildings.reduce((s, v) => s + v, 0);
+}
+function islandLogPush(p, entry) {
+  const isl = islandStateOf(p);
+  isl.log.unshift(entry);
+  if (isl.log.length > 20) isl.log.length = 20;
+}
+function wheelStateOf(p, now) {
+  if (!p.wheel || typeof p.wheel !== 'object') p.wheel = { date: '', spins: 0, adUsed: 0 };
+  const today = vnDateOf(now);
+  if (p.wheel.date !== today) { // ngày mới (giờ VN): cấp 3 lượt free, reset lượt ads
+    p.wheel.date = today;
+    p.wheel.adUsed = 0;
+    p.wheel.spins = Math.min(WHEEL_SPIN_CAP, Math.max(0, Math.floor(Number(p.wheel.spins) || 0)) + WHEEL_FREE_SPINS);
+    return { wheel: p.wheel, rolled: true };
+  }
+  return { wheel: p.wheel, rolled: false };
+}
+function islandInfoFor(p, now) {
+  const isl = islandStateOf(p);
+  const { wheel } = wheelStateOf(p, now);
+  const r = raidStateOf(p, now);
+  return {
+    spins: wheel.spins,
+    adUsed: wheel.adUsed,
+    adMax: WHEEL_AD_SPINS_MAX,
+    islandNo: isl.no,
+    buildings: [...isl.buildings],
+    costs: isl.buildings.map((lvl, b) => (lvl >= ISLAND_MAX_LEVEL ? null : islandCost(isl.no, b, lvl))),
+    totalLevels: isl.buildings.reduce((s, v) => s + v, 0),
+    maxLevels: ISLAND_MAX_LEVEL * ISLAND_BUILDINGS.length,
+    log: isl.log.slice(0, 10),
+    shieldUntil: r.shieldUntil || 0,
+    shieldActive: (r.shieldUntil || 0) > now,
+  };
+}
+function fmtGoldVN(n) { return String(Math.floor(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
+
 // Thưởng MỐC mỗi 10 cấp — nhận 1 lần, server kiểm chứng cấp thật rồi mới trả.
 const LEVEL_MILESTONE_REWARDS = {
   10: { gold: 25000, gems: 300 },
@@ -469,6 +549,8 @@ function newSave(playerId, now) {
     levelClaims: [],          // các mốc cấp người chơi đã nhận thưởng (vd [10, 20]) — server là nguồn sự thật
     raid: { date: '', used: 0, shieldUntil: 0, pending: null, log: [] }, // PvP đột kích: lượt/ngày, khiên, đối thủ đang nhắm, nhật ký — server là nguồn sự thật
     lastAdChestAt: 0,         // mốc mở rương vàng ads gần nhất (ms) — cooldown phía server, client không khai được
+    island: { no: 1, buildings: [0, 0, 0, 0, 0], log: [] }, // Đảo Vàng: số đảo + cấp 5 công trình + nhật ký — server là nguồn sự thật
+    wheel: { date: '', spins: 0, adUsed: 0 }, // Vòng quay: ngày VN, lượt quay đang có, lượt ads đã dùng hôm nay — server là nguồn sự thật
     _burst: 15000,            // ngân sách chống gian lận còn lại (xem POST /api/save)
     _burstGems: 2000,         // ngân sách KC theo thời gian (vá 2026-11-24)
     friendsCount: 0,
@@ -1439,6 +1521,216 @@ const server = http.createServer(async (req, res) => {
       raidLogPush(target, { id: entry.id + 'd', t: now, kind: 'defense', win: !win, gold: steal, name: playerDisplayName(me), otherId: me.playerId, revengeUsed: false });
       await persist();
       return sendJson(res, 200, { win, steal, gold: me.gold, opponentName: playerDisplayName(target), ...raidInfoFor(me, now) });
+    }
+
+    /* ---- GET /api/island/info?playerId= ----
+     * Trạng thái Đảo Vàng + Vòng quay của người chơi; lần gọi đầu ngày mới
+     * (giờ VN) tự cấp 3 lượt quay free (wheelStateOf) và lưu lại. */
+    if (req.method === 'GET' && url.pathname === '/api/island/info') {
+      const playerId = String(url.searchParams.get('playerId') || '');
+      if (!playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('island:' + clientIp(req), 60, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const me = getOrCreatePlayer(playerId, now);
+      const { rolled } = wheelStateOf(me, now);
+      islandStateOf(me);
+      if (rolled) await persist();
+      return sendJson(res, 200, islandInfoFor(me, now));
+    }
+
+    /* ---- POST /api/island/ad-spin {playerId} ----
+     * Client gọi SAU khi AdsGram xác nhận xem hết ads (mức tin cậy như ads
+     * KC sẵn có); server chỉ đếm số lượt/ngày (tối đa 5) và trần tích lũy. */
+    if (req.method === 'POST' && url.pathname === '/api/island/ad-spin') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('wheel:' + playerId, 15, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const me = getOrCreatePlayer(playerId, now);
+      const { wheel } = wheelStateOf(me, now);
+      if (wheel.adUsed >= WHEEL_AD_SPINS_MAX) {
+        return sendJson(res, 400, { error: `Hôm nay bạn đã lấy tối đa ${WHEEL_AD_SPINS_MAX} lượt quay bằng ads rồi` });
+      }
+      if (wheel.spins >= WHEEL_SPIN_CAP) {
+        return sendJson(res, 400, { error: 'Bạn đang giữ nhiều lượt quay quá — quay bớt rồi quay lại nhé' });
+      }
+      wheel.adUsed += 1;
+      wheel.spins += 1;
+      await persist();
+      return sendJson(res, 200, { spins: wheel.spins, adUsed: wheel.adUsed, adMax: WHEEL_AD_SPINS_MAX });
+    }
+
+    /* ---- POST /api/island/spin {playerId} ----
+     * Quay 1 lượt: SERVER tung ô theo trọng số, áp kết quả ngay (vàng/KC
+     * theo gps thật + trần; khiên/lượt đột kích dùng chung state raid; cướp
+     * vàng + phá đảo nhắm người chơi thật theo luật đột kích). Client chỉ
+     * chạy hoạt ảnh dừng ở ô server trả về (segment). */
+    if (req.method === 'POST' && url.pathname === '/api/island/spin') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('wheel:' + playerId, 30, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const me = getOrCreatePlayer(playerId, now);
+      const { wheel } = wheelStateOf(me, now);
+      if (wheel.spins <= 0) {
+        return sendJson(res, 400, { error: 'Hết lượt quay rồi — xem ads lấy thêm lượt hoặc mai quay lại nhé' });
+      }
+      wheel.spins -= 1;
+      const gps = gpsOf(me) + extraGpsOf(extrasOf(me.tasks));
+      const goldByGps = (secs, min, cap) => Math.min(cap, Math.max(min, Math.round(gps * secs)));
+      let roll = Math.random() * 100;
+      let segIdx = WHEEL_SEGMENTS.length - 1;
+      for (let i = 0; i < WHEEL_SEGMENTS.length; i++) {
+        roll -= WHEEL_SEGMENTS[i].weight;
+        if (roll < 0) { segIdx = i; break; }
+      }
+      const seg = WHEEL_SEGMENTS[segIdx];
+      const result = { segment: segIdx, key: seg.key, gold: 0, gems: 0, targetName: '', building: '' };
+      const fallbackGold = () => { // ô PvP mà không có đối thủ hợp lệ -> đổi thành vàng nhỏ
+        result.key = 'gold_small';
+        result.gold = goldByGps(120, 2000, 100000);
+        me.gold += result.gold;
+      };
+      if (seg.key === 'gold_small') { result.gold = goldByGps(120, 2000, 100000); me.gold += result.gold; }
+      else if (seg.key === 'gold_big') { result.gold = goldByGps(600, 10000, 400000); me.gold += result.gold; }
+      else if (seg.key === 'jackpot') { result.gold = goldByGps(3000, 50000, 1000000); me.gold += result.gold; }
+      else if (seg.key === 'gems_30') { result.gems = 30; me.gems += 30; }
+      else if (seg.key === 'gems_100') { result.gems = 100; me.gems += 100; }
+      else if (seg.key === 'shield') {
+        const r = raidStateOf(me, now);
+        r.shieldUntil = Math.max(r.shieldUntil || 0, now + RAID_SHIELD_MS);
+        result.shieldUntil = r.shieldUntil;
+      }
+      else if (seg.key === 'raid_ticket') {
+        const r = raidStateOf(me, now);
+        r.used = Math.max(0, r.used - 1);
+      }
+      else if (seg.key === 'steal') {
+        const candidates = Object.values(data.players).filter((q) => q && q.playerId !== playerId
+          && (q.totalEarned || 0) >= RAID_MIN_TARGET_EARNED
+          && (q.gold || 0) >= RAID_MIN_TARGET_GOLD
+          && (raidStateOf(q, now).shieldUntil || 0) <= now);
+        if (!candidates.length) fallbackGold();
+        else {
+          const target = candidates[Math.floor(Math.random() * candidates.length)];
+          const tRaid = raidStateOf(target, now);
+          let steal = Math.floor(Math.min(RAID_STEAL_PCT * (target.gold || 0), 0.02 * (me.totalEarned || 0) + 50000, 1000000));
+          steal = Math.max(0, Math.min(steal, Math.floor(target.gold || 0)));
+          const myRaid = raidStateOf(me, now);
+          const entryId = 'w' + now.toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+          target.gold -= steal;
+          me.gold += steal;
+          result.gold = steal;
+          result.targetName = playerDisplayName(target);
+          myRaid.stats.atk += 1; myRaid.stats.atkWin += 1; myRaid.stats.stolen += steal;
+          tRaid.stats.def += 1; tRaid.stats.lost += steal;
+          tRaid.shieldUntil = now + RAID_SHIELD_MS;
+          raidLogPush(me, { id: entryId + 'a', t: now, kind: 'attack', win: true, gold: steal, name: playerDisplayName(target), otherId: target.playerId });
+          raidLogPush(target, { id: entryId, t: now, kind: 'defense', win: false, gold: steal, name: playerDisplayName(me), otherId: me.playerId, revengeUsed: false });
+        }
+      }
+      else if (seg.key === 'attack') {
+        const candidates = Object.values(data.players).filter((q) => q && q.playerId !== playerId
+          && islandTotalLevels(q) >= 3
+          && (raidStateOf(q, now).shieldUntil || 0) <= now);
+        if (!candidates.length) fallbackGold();
+        else {
+          const target = candidates[Math.floor(Math.random() * candidates.length)];
+          const tIsl = islandStateOf(target);
+          const built = tIsl.buildings.map((lvl, i) => (lvl >= 1 ? i : -1)).filter((i) => i >= 0);
+          const b = built[Math.floor(Math.random() * built.length)];
+          tIsl.buildings[b] -= 1;
+          result.gold = goldByGps(180, 5000, 150000);
+          me.gold += result.gold;
+          result.targetName = playerDisplayName(target);
+          result.building = ISLAND_BUILDINGS[b].name;
+          islandLogPush(me, { t: now, kind: 'attack', name: playerDisplayName(target), building: ISLAND_BUILDINGS[b].name, gold: result.gold });
+          islandLogPush(target, { t: now, kind: 'smashed', name: playerDisplayName(me), building: ISLAND_BUILDINGS[b].name, gold: 0 });
+        }
+      }
+      me._clientGold = me.gold; me._clientGems = me.gems; // gộp delta giữ các khoản server cộng/trừ này
+      me._lastSync = now; me.lastSeen = now;
+      await persist();
+      return sendJson(res, 200, {
+        segment: result.segment,
+        key: result.key,
+        rewardGold: result.gold,   // phần thưởng của lượt quay này (khác gold = số dư bên dưới)
+        rewardGems: result.gems,
+        targetName: result.targetName,
+        building: result.building,
+        shieldUntil: result.shieldUntil || 0,
+        spins: wheel.spins,
+        gold: me.gold,
+        gems: me.gems,
+        island: islandInfoFor(me, now),
+        raid: raidInfoFor(me, now),
+      });
+    }
+
+    /* ---- POST /api/island/build {playerId, building} ----
+     * Nâng 1 công trình +1 cấp: server tự tính giá theo đảo/cấp hiện tại,
+     * trừ vàng thật rồi mới tăng cấp (client không khai giá được). Đủ 5
+     * công trình cấp 5 -> hoàn thành đảo: trả thưởng, qua đảo tiếp theo
+     * với bảng giá x3,5. */
+    if (req.method === 'POST' && url.pathname === '/api/island/build') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('island:' + playerId, 30, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const b = Math.floor(Number(body.building));
+      if (!(b >= 0 && b < ISLAND_BUILDINGS.length)) {
+        return sendJson(res, 400, { error: 'Công trình không hợp lệ' });
+      }
+      const me = getOrCreatePlayer(playerId, now);
+      const isl = islandStateOf(me);
+      const lvl = isl.buildings[b];
+      if (lvl >= ISLAND_MAX_LEVEL) {
+        return sendJson(res, 400, { error: 'Công trình này đã đạt cấp tối đa rồi' });
+      }
+      const cost = islandCost(isl.no, b, lvl);
+      if ((me.gold || 0) < cost) {
+        return sendJson(res, 400, { error: `Chưa đủ vàng — nâng ${ISLAND_BUILDINGS[b].name} lên cấp ${lvl + 1} cần ${fmtGoldVN(cost)} vàng` });
+      }
+      me.gold -= cost;
+      isl.buildings[b] = lvl + 1;
+      let completed = false;
+      let reward = null;
+      if (isl.buildings.every((v) => v >= ISLAND_MAX_LEVEL)) {
+        completed = true;
+        reward = { gold: 200000 * isl.no, gems: 400 * isl.no };
+        me.gold += reward.gold;
+        me.gems += reward.gems;
+        islandLogPush(me, { t: now, kind: 'complete', name: '', building: '', gold: reward.gold });
+        isl.no += 1;
+        isl.buildings = [0, 0, 0, 0, 0];
+      }
+      me._clientGold = me.gold; me._clientGems = me.gems;
+      me._lastSync = now; me.lastSeen = now;
+      await persist();
+      return sendJson(res, 200, {
+        ok: true, cost, completed, reward,
+        gold: me.gold, gems: me.gems,
+        island: islandInfoFor(me, now),
+      });
     }
 
     /* ---- GET /api/owner/top-players (chỉ chủ game) ----
