@@ -51,6 +51,68 @@ function playerLevelOf(totalEarned) {
   }
   return lv;
 }
+/* ---------------- PvP ĐỘT KÍCH MỎ (hằng số + hàm phụ) ---------------- */
+const RAID_DAILY_MAX = 5;              // lượt tấn công miễn phí mỗi ngày (theo ngày giờ VN)
+const RAID_SHIELD_MS = 4 * 3600e3;     // khiên 4 giờ sau khi bị cướp thành công
+const RAID_MIN_TARGET_GOLD = 50000;    // đối thủ phải có ít nhất chừng này vàng mới bị nhắm
+const RAID_MIN_TARGET_EARNED = 100000; // tân thủ (tổng đào < 100.000) được miễn đột kích
+const RAID_STEAL_PCT = 0.05;           // cướp tối đa 5% số dư đối thủ
+const RAID_STEAL_CAP = 2000000;        // trần vàng cướp được trong 1 lượt
+const RAID_PAIR_COOLDOWN_MS = 24 * 3600e3; // không tấn công lại cùng 1 người trong 24h; cũng là hạn phản công
+function vnDateOf(now) { return new Date(now + 7 * 3600e3).toISOString().slice(0, 10); }
+function raidStateOf(p, now) {
+  if (!p.raid || typeof p.raid !== 'object') p.raid = { date: '', used: 0, shieldUntil: 0, pending: null, log: [] };
+  if (!Array.isArray(p.raid.log)) p.raid.log = [];
+  const today = vnDateOf(now);
+  if (p.raid.date !== today) { p.raid.date = today; p.raid.used = 0; }
+  return p.raid;
+}
+function raidPowerOf(p) {
+  const extras = extrasOf(p.tasks);
+  const clickLevel = extras && Number.isFinite(extras.clickLevel) ? Math.min(500, Math.max(1, Math.floor(extras.clickLevel))) : 1;
+  return { gps: gpsOf(p) + extraGpsOf(extras), tap: clickLevel };
+}
+function playerDisplayName(p) {
+  return (typeof p.displayName === 'string' && p.displayName) || ('Thợ mỏ #' + String(p.referralCode || p.playerId || '????').slice(-4).toUpperCase());
+}
+function raidLogPush(p, entry) {
+  raidStateOf(p, entry.t);
+  p.raid.log.unshift(entry);
+  if (p.raid.log.length > 20) p.raid.log.length = 20;
+}
+function publicRaidLog(p, now) {
+  return (p.raid.log || []).map((e) => ({
+    id: e.id, t: e.t, kind: e.kind, win: !!e.win, gold: e.gold || 0, name: e.name || 'Thợ mỏ',
+    canRevenge: e.kind === 'defense' && !e.win && !e.revengeUsed && (now - e.t) < RAID_PAIR_COOLDOWN_MS,
+  }));
+}
+function raidInfoFor(p, now) {
+  const r = raidStateOf(p, now);
+  return {
+    attacksLeft: Math.max(0, RAID_DAILY_MAX - r.used),
+    attacksMax: RAID_DAILY_MAX,
+    shieldUntil: r.shieldUntil || 0,
+    shieldActive: (r.shieldUntil || 0) > now,
+    log: publicRaidLog(p, now),
+  };
+}
+// Tung xúc xắc 1 trận: điểm tấn công = sản lượng 10 giây + chạm x sức chạm;
+// phòng thủ được +15% lợi thế sân nhà + lính gác. Xác suất thắng kẹp 15–90%.
+function resolveRaid(attacker, target, tapsRaw) {
+  const taps = Math.max(0, Math.min(100, Math.floor(Number(tapsRaw) || 0)));
+  const ap = raidPowerOf(attacker);
+  const dp = raidPowerOf(target);
+  const atkScore = ap.gps * 10 + taps * ap.tap;
+  const defScore = dp.gps * 10 * 1.15 + 20 * dp.tap;
+  const prob = Math.min(0.9, Math.max(0.15, atkScore / Math.max(1, atkScore + defScore)));
+  const win = Math.random() < prob;
+  let steal = 0;
+  if (win) {
+    steal = Math.floor(Math.min(RAID_STEAL_PCT * (target.gold || 0), 0.02 * (attacker.totalEarned || 0) + 50000, RAID_STEAL_CAP));
+    steal = Math.max(0, Math.min(steal, Math.floor(target.gold || 0)));
+  }
+  return { win, steal, prob };
+}
 // Thưởng MỐC mỗi 10 cấp — nhận 1 lần, server kiểm chứng cấp thật rồi mới trả.
 const LEVEL_MILESTONE_REWARDS = {
   10: { gold: 25000, gems: 300 },
@@ -394,6 +456,7 @@ function newSave(playerId, now) {
     refTiersPaid: 0,          // số tier thưởng ref đã trả cho người giới thiệu nhờ player này (0..3)
     channelClaimed: false,    // đã nhận thưởng nhiệm vụ tham gia kênh chưa (server là nguồn sự thật, client không khai được)
     levelClaims: [],          // các mốc cấp người chơi đã nhận thưởng (vd [10, 20]) — server là nguồn sự thật
+    raid: { date: '', used: 0, shieldUntil: 0, pending: null, log: [] }, // PvP đột kích: lượt/ngày, khiên, đối thủ đang nhắm, nhật ký — server là nguồn sự thật
     _burst: 15000,            // ngân sách chống gian lận còn lại (xem POST /api/save)
     _burstGems: 2000,         // ngân sách KC theo thời gian (vá 2026-11-24)
     friendsCount: 0,
@@ -1178,6 +1241,153 @@ const server = http.createServer(async (req, res) => {
       me._lastSync = now; me.lastSeen = now;
       await persist();
       return sendJson(res, 200, { save: me, reward, playerLevel: myLevel });
+    }
+
+    /* ================= PvP — ĐỘT KÍCH MỎ (bất đồng bộ) =================
+     * Tấn công mỏ của người chơi khác lúc họ vắng mặt. Server chọn đối
+     * thủ, server tung xúc xắc theo sức mạnh 2 bên + số chạm rush 10
+     * giây của người tấn công (client gửi, server kẹp tối đa 100).
+     * Thắng = CHUYỂN vàng của đối thủ sang mình (không in vàng mới,
+     * không cộng totalEarned), đối thủ nhận khiên 4 giờ + quyền phản
+     * công trong 24 giờ. Tân thủ (tổng đào < 100.000) được miễn nhiễm. */
+    if (req.method === 'GET' && url.pathname === '/api/raid/info') {
+      const pid = url.searchParams.get('playerId') || '';
+      if (!pid) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      if (!requestAuthorizedFor(req, pid)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      const me = getOrCreatePlayer(pid, now);
+      return sendJson(res, 200, raidInfoFor(me, now));
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/raid/scout') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('raid:' + playerId, 30, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const me = getOrCreatePlayer(playerId, now);
+      const myRaid = raidStateOf(me, now);
+      if (myRaid.used >= RAID_DAILY_MAX) {
+        return sendJson(res, 400, { error: `Bạn đã hết lượt đột kích hôm nay (${RAID_DAILY_MAX} lượt/ngày) — mai quay lại nhé` });
+      }
+      const myEarned = me.totalEarned || 0;
+      const attackedRecently = new Set(myRaid.log.filter((e) => e.kind === 'attack' && e.otherId && now - e.t < RAID_PAIR_COOLDOWN_MS).map((e) => e.otherId));
+      const eligible = (p) => p && p.playerId !== playerId
+        && (p.totalEarned || 0) >= RAID_MIN_TARGET_EARNED
+        && (p.gold || 0) >= RAID_MIN_TARGET_GOLD
+        && !(p.raid && (p.raid.shieldUntil || 0) > now)
+        && !attackedRecently.has(p.playerId);
+      let candidates = Object.values(data.players).filter((p) => eligible(p)
+        && (p.totalEarned || 0) >= myEarned * 0.2 && (p.totalEarned || 0) <= Math.max(myEarned * 5, 500000));
+      if (candidates.length === 0) candidates = Object.values(data.players).filter(eligible);
+      if (candidates.length === 0) {
+        myRaid.pending = null;
+        await persist();
+        return sendJson(res, 200, { opponent: null, ...raidInfoFor(me, now) });
+      }
+      const target = candidates[Math.floor(Math.random() * candidates.length)];
+      myRaid.pending = { targetId: target.playerId, expires: now + 90000 };
+      await persist();
+      const dp = raidPowerOf(target);
+      return sendJson(res, 200, {
+        opponent: {
+          name: playerDisplayName(target),
+          level: playerLevelOf(target.totalEarned),
+          totalEarned: Math.floor(target.totalEarned),
+          goldBand: Math.floor((target.gold || 0) / 10000) * 10000,
+          power: Math.round(dp.gps * 10 * 1.15 + 20 * dp.tap),
+        },
+        myPower: Math.round(raidPowerOf(me).gps * 10),
+        ...raidInfoFor(me, now),
+      });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/raid/attack') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('raid:' + playerId, 30, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const me = getOrCreatePlayer(playerId, now);
+      const myRaid = raidStateOf(me, now);
+      if (myRaid.used >= RAID_DAILY_MAX) {
+        return sendJson(res, 400, { error: `Bạn đã hết lượt đột kích hôm nay (${RAID_DAILY_MAX} lượt/ngày) — mai quay lại nhé` });
+      }
+      const pending = myRaid.pending;
+      if (!pending || pending.expires < now) {
+        return sendJson(res, 400, { error: 'Lượt tìm đối thủ đã hết hạn — hãy tìm lại đối thủ mới' });
+      }
+      const target = data.players[pending.targetId];
+      myRaid.pending = null;
+      if (!target) { await persist(); return sendJson(res, 400, { error: 'Đối thủ không còn tồn tại' }); }
+      const tRaid = raidStateOf(target, now);
+      if ((tRaid.shieldUntil || 0) > now) {
+        await persist();
+        return sendJson(res, 400, { error: 'Đối thủ vừa dựng khiên bảo vệ — hãy tìm đối thủ khác' });
+      }
+      if ((target.gold || 0) < 1000) {
+        await persist();
+        return sendJson(res, 400, { error: 'Đối thủ không còn đủ vàng để cướp — hãy tìm đối thủ khác' });
+      }
+      myRaid.used += 1;
+      const { win, steal } = resolveRaid(me, target, body.taps, now);
+      const entryId = now.toString(36) + Math.random().toString(36).slice(2, 7);
+      if (win) {
+        target.gold -= steal;
+        me.gold += steal;
+        me._clientGold = me.gold; // đồng bộ số dư mới cho client của người tấn công
+        tRaid.shieldUntil = now + RAID_SHIELD_MS;
+      }
+      raidLogPush(me, { id: entryId + 'a', t: now, kind: 'attack', win, gold: steal, name: playerDisplayName(target), otherId: target.playerId });
+      raidLogPush(target, { id: entryId, t: now, kind: 'defense', win: !win, gold: steal, name: playerDisplayName(me), otherId: me.playerId, revengeUsed: false });
+      await persist();
+      return sendJson(res, 200, { win, steal, gold: me.gold, opponentName: playerDisplayName(target), ...raidInfoFor(me, now) });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/raid/revenge') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('raid:' + playerId, 30, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const me = getOrCreatePlayer(playerId, now);
+      const myRaid = raidStateOf(me, now);
+      const entry = myRaid.log.find((e) => e.id === String(body.logId || '') && e.kind === 'defense' && !e.win && !e.revengeUsed);
+      if (!entry) return sendJson(res, 400, { error: 'Lượt phản công này không còn hiệu lực' });
+      if (now - entry.t >= RAID_PAIR_COOLDOWN_MS) {
+        return sendJson(res, 400, { error: 'Đã quá 24 giờ — không phản công được nữa' });
+      }
+      const target = data.players[entry.otherId];
+      if (!target) return sendJson(res, 400, { error: 'Đối thủ không còn tồn tại' });
+      const tRaid = raidStateOf(target, now);
+      if ((target.gold || 0) < 1000) {
+        return sendJson(res, 400, { error: 'Đối thủ không còn đủ vàng để cướp lại' });
+      }
+      entry.revengeUsed = true; // phản công xuyên khiên, không tốn lượt ngày, mỗi vụ chỉ 1 lần
+      const { win, steal } = resolveRaid(me, target, body.taps, now);
+      if (win) {
+        target.gold -= steal;
+        me.gold += steal;
+        me._clientGold = me.gold;
+        tRaid.shieldUntil = now + RAID_SHIELD_MS;
+      }
+      raidLogPush(me, { id: entry.id + 'r', t: now, kind: 'revenge', win, gold: steal, name: playerDisplayName(target), otherId: target.playerId });
+      raidLogPush(target, { id: entry.id + 'd', t: now, kind: 'defense', win: !win, gold: steal, name: playerDisplayName(me), otherId: me.playerId, revengeUsed: false });
+      await persist();
+      return sendJson(res, 200, { win, steal, gold: me.gold, opponentName: playerDisplayName(target), ...raidInfoFor(me, now) });
     }
 
     /* ---- GET /api/owner/top-players (chỉ chủ game) ----
