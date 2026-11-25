@@ -34,6 +34,15 @@ const REFERRAL_REWARD = { gold: 25000, gems: 500 }; // quà NGAY cho người đ
 const REFERRAL_INVITER_REWARD = { gold: 2000, gems: 50 }; // quà NGAY cho người mời khi bạn mới ghi nhận ref
 const CHANNEL_ID = '@ThoMoVangOfficial'; // kênh Telegram chính thức (phát mã quà mỗi ngày)
 const CHANNEL_REWARD = { gold: 10000, gems: 200 }; // thưởng nhiệm vụ tham gia kênh — nhận 1 lần, server kiểm chứng thành viên thật qua Bot API (getChatMember; bot phải là admin của kênh)
+/* ---- Rương vàng quảng cáo (2026-11-25): thưởng theo TỐC ĐỘ ĐÀO THẬT phía
+ * server thay cho mức phẳng 5.000 cũ (quá nhỏ với người chơi mạnh nên họ bỏ
+ * xem ads): 5 phút thu nhập (gps x 300 giây), sàn 5.000 cho người mới, trần
+ * 250.000 cho cá voi. Cooldown 60 giây/lần lưu phía server (lastAdChestAt)
+ * để gọi thẳng endpoint cũng không farm được. ---- */
+const AD_CHEST_SECONDS = 300;
+const AD_CHEST_MIN = 5000;
+const AD_CHEST_CAP = 250000;
+const AD_CHEST_COOLDOWN_MS = 60000;
 /* ---- Cấp độ NGƯỜI CHƠI (khác cấp thợ mua bằng KC): theo TỔNG VÀNG ĐÀO tích
  * lũy (totalEarned — server đã kẹp chống gian lận), cấp 1..50. Ngưỡng đạt
  * cấp n (n>=2) = làm tròn nghìn của 2500 x (n-1)^2.6: cấp 10 ~777.000,
@@ -459,6 +468,7 @@ function newSave(playerId, now) {
     channelClaimed: false,    // đã nhận thưởng nhiệm vụ tham gia kênh chưa (server là nguồn sự thật, client không khai được)
     levelClaims: [],          // các mốc cấp người chơi đã nhận thưởng (vd [10, 20]) — server là nguồn sự thật
     raid: { date: '', used: 0, shieldUntil: 0, pending: null, log: [] }, // PvP đột kích: lượt/ngày, khiên, đối thủ đang nhắm, nhật ký — server là nguồn sự thật
+    lastAdChestAt: 0,         // mốc mở rương vàng ads gần nhất (ms) — cooldown phía server, client không khai được
     _burst: 15000,            // ngân sách chống gian lận còn lại (xem POST /api/save)
     _burstGems: 2000,         // ngân sách KC theo thời gian (vá 2026-11-24)
     friendsCount: 0,
@@ -1207,6 +1217,39 @@ const server = http.createServer(async (req, res) => {
       me._lastSync = now; me.lastSeen = now;
       await persist();
       return sendJson(res, 200, { joined: true, save: me, reward: CHANNEL_REWARD });
+    }
+
+    /* ---- POST /api/ad-chest {playerId} ----
+     * Rương vàng quảng cáo: client chỉ gọi sau khi AdsGram xác nhận xem hết
+     * ads; số vàng do SERVER tính từ tốc độ đào thật của chính người chơi
+     * (gpsOf + extraGpsOf — client không khai khống được): gps x 300 giây
+     * (5 phút thu nhập), sàn 5.000, trần 250.000. Cooldown 60 giây/lần bằng
+     * lastAdChestAt phía server nên gọi thẳng endpoint cũng không farm
+     * được; khoản cộng đi qua _clientGold để gộp delta không ghi đè mất. */
+    if (req.method === 'POST' && url.pathname === '/api/ad-chest') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('adchest:' + playerId, 10, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const me = getOrCreatePlayer(playerId, now);
+      const waitMs = AD_CHEST_COOLDOWN_MS - (now - (Number(me.lastAdChestAt) || 0));
+      if (waitMs > 0) {
+        const waitSec = Math.ceil(waitMs / 1000);
+        return sendJson(res, 429, { error: `Rương vàng vừa mở rồi — đợi ${waitSec} giây nữa nhé`, retryAfterSec: waitSec });
+      }
+      const gps = gpsOf(me) + extraGpsOf(extrasOf(me.tasks));
+      const reward = Math.min(AD_CHEST_CAP, Math.max(AD_CHEST_MIN, Math.round(gps * AD_CHEST_SECONDS)));
+      me.gold += reward;
+      me.lastAdChestAt = now;
+      me._clientGold = me.gold; // client nhận số dư mới trong đáp, gộp delta giữ khoản cộng này
+      me._lastSync = now; me.lastSeen = now;
+      await persist();
+      return sendJson(res, 200, { save: me, reward: { gold: reward }, gps });
     }
 
     /* ---- POST /api/level-claim {playerId, level} ----
