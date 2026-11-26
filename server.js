@@ -332,7 +332,7 @@ const MINERS = [
   { id: 'doi_dao',  name: 'Đội Đào Vàng',    baseCost: 8000,    gps: 1.375 },
   { id: 'may_khoan', name: 'Máy Khoan Đá',   baseCost: 45000,   gps: 7.5 },
   { id: 'may_xuc',  name: 'Máy Xúc Vàng',    baseCost: 260000,  gps: 40.625 },
-  { id: 'gian_khoan', name: 'Giàn Khoan Vàng', baseCost: 1500000, gps: 200 },
+  { id: 'gian_khoan', name: 'Giàn Khoan Vàng', baseCost: 1500000, gps: 150 }, // gps 200 -> 150 (giảm earn top, Kien chốt 2026-11-27)
 ];
 
 /* ---------------- Bot Telegram: tin chào khi người chơi bấm /start ----------------
@@ -574,8 +574,8 @@ function gpsOf(save) {
 const MINER_CHECK_PRICES = { tap_su: 45, lanh_nghe: 300, doi_dao: 3300, may_khoan: 36000, may_xuc: 390000, gian_khoan: 4200000 };
 // Hai loại thợ chỉ có phía client (đóng gói trong extras __tmv): giá + gps hiện tại.
 const EXTRA_MINERS = {
-  robot: { baseCost: 60000000, gps: 1000 },
-  mo_tu_dong: { baseCost: 300000000, gps: 5312.5 }, // giá giảm 990tr -> 300tr theo yêu cầu Kien 2026-11-25
+  robot: { baseCost: 60000000, gps: 700 }, // gps 1000 -> 700 (giảm earn top, Kien chốt 2026-11-27)
+  mo_tu_dong: { baseCost: 300000000, gps: 3500 }, // giá giảm 990tr -> 300tr theo yêu cầu Kien 2026-11-25; gps 5312.5 -> 3500 (giảm earn top, Kien chốt 2026-11-27)
 };
 // Tổng giá hình học (không làm tròn từng con) để kiểm tra khả năng chi trả.
 function seriesCost(base, from, to) {
