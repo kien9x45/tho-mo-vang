@@ -73,8 +73,9 @@ function raidStateOf(p, now) {
   if (!p.raid || typeof p.raid !== 'object') p.raid = { date: '', used: 0, shieldUntil: 0, pending: null, log: [] };
   if (!Array.isArray(p.raid.log)) p.raid.log = [];
   if (!p.raid.stats || typeof p.raid.stats !== 'object') p.raid.stats = { atk: 0, atkWin: 0, stolen: 0, def: 0, defWin: 0, lost: 0, rev: 0, revWin: 0 };
+  if (!Number.isFinite(p.raid.bonus)) p.raid.bonus = 0; // lượt đột kích cộng thêm (vé đột kích chợ + ô vòng quay) — reset theo ngày
   const today = vnDateOf(now);
-  if (p.raid.date !== today) { p.raid.date = today; p.raid.used = 0; }
+  if (p.raid.date !== today) { p.raid.date = today; p.raid.used = 0; p.raid.bonus = 0; }
   return p.raid;
 }
 function raidPowerOf(p) {
@@ -99,7 +100,7 @@ function publicRaidLog(p, now) {
 function raidInfoFor(p, now) {
   const r = raidStateOf(p, now);
   return {
-    attacksLeft: Math.max(0, RAID_DAILY_MAX - r.used),
+    attacksLeft: Math.max(0, RAID_DAILY_MAX - r.used) + (r.bonus || 0),
     attacksMax: RAID_DAILY_MAX,
     shieldUntil: r.shieldUntil || 0,
     shieldActive: (r.shieldUntil || 0) > now,
@@ -134,6 +135,23 @@ function resolveRaid(attacker, target, tapsRaw) {
 const WHEEL_FREE_SPINS = 3;        // lượt quay free cấp mỗi ngày (giờ VN)
 const WHEEL_AD_SPINS_MAX = 5;      // tối đa lượt quay kiếm thêm bằng ads mỗi ngày
 const WHEEL_SPIN_CAP = 20;         // trần lượt quay tích lũy được
+/* ---- Chợ vật phẩm (hệ thống bán bằng KC — Kien chốt 2026-11-26) ----
+ * Giá KC do server giữ; túi đồ (inv) lưu phía server. Mua = trừ KC + cộng
+ * túi; Dùng = trừ túi + áp hiệu ứng tại server (khiên/vé quay/vé đột kích/
+ * rương vàng), riêng x2 thu nhập trả số phút về cho client áp vào
+ * boostUntil (vốn là cơ chế phía client như boost xem ads). */
+const MARKET_ITEMS = {
+  shield4: { price: 150 },     // khiên bảo vệ mỏ 4 giờ
+  shield24: { price: 600 },    // khiên bảo vệ mỏ 24 giờ
+  raid_ticket: { price: 100 }, // +1 lượt đột kích trong ngày
+  spin_ticket: { price: 120 }, // +1 lượt quay Đảo Vàng
+  boost30: { price: 200 },     // x2 thu nhập 30 phút
+  gold_chest: { price: 250 },  // mở ra vàng = gps x 300 giây (sàn 5.000, trần 250.000 — như rương ads)
+};
+function invOf(p) {
+  if (!p.inv || typeof p.inv !== 'object') p.inv = {};
+  return p.inv;
+}
 // Thứ tự ô trên vòng quay — client (App.tsx WHEEL_SEGMENTS) PHẢI giữ đúng thứ tự này.
 const WHEEL_SEGMENTS = [
   { key: 'gold_small', weight: 26 },
@@ -612,6 +630,7 @@ function newSave(playerId, now) {
     lastAdChestAt: 0,         // mốc mở rương vàng ads gần nhất (ms) — cooldown phía server, client không khai được
     island: { no: 1, buildings: [0, 0, 0, 0, 0], log: [], week: { key: '', score: 0, at: 0 } }, // Đảo Vàng: số đảo + cấp 5 công trình + nhật ký + điểm đua tuần — server là nguồn sự thật
     wheel: { date: '', spins: 0, adUsed: 0 }, // Vòng quay: ngày VN, lượt quay đang có, lượt ads đã dùng hôm nay — server là nguồn sự thật
+    inv: {},                  // Túi đồ chợ vật phẩm: { itemId: số lượng } — server là nguồn sự thật, client không khai được
     _burst: 15000,            // ngân sách chống gian lận còn lại (xem POST /api/save)
     _burstGems: 2000,         // ngân sách KC theo thời gian (vá 2026-11-24)
     friendsCount: 0,
@@ -1395,6 +1414,104 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { save: me, reward: { gold: reward }, gps });
     }
 
+    /* ---- GET /api/market/info?playerId= ----
+     * Chợ vật phẩm: trả giá KC (server là nguồn sự thật) + túi đồ hiện có. */
+    if (req.method === 'GET' && url.pathname === '/api/market/info') {
+      const pid = url.searchParams.get('playerId') || '';
+      if (pid && !requestAuthorizedFor(req, pid)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('market:' + clientIp(req), 60, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const prices = {};
+      for (const [id, it] of Object.entries(MARKET_ITEMS)) prices[id] = it.price;
+      const me = pid ? data.players[pid] : null;
+      return sendJson(res, 200, { prices, inv: me ? invOf(me) : {} });
+    }
+
+    /* ---- POST /api/market/buy {playerId, itemId} ----
+     * Mua vật phẩm bằng KC: server trừ KC theo giá server giữ rồi cộng túi
+     * đồ. Số dư KC mới đi qua _clientGems để client gộp delta không ghi đè. */
+    if (req.method === 'POST' && url.pathname === '/api/market/buy') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('market:' + playerId, 30, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const item = MARKET_ITEMS[String(body.itemId || '')];
+      if (!item) return sendJson(res, 400, { error: 'Vật phẩm không tồn tại' });
+      const me = getOrCreatePlayer(playerId, now);
+      if ((me.gems || 0) < item.price) {
+        return sendJson(res, 400, { error: `Không đủ kim cương — vật phẩm này giá ${item.price} KC, bạn đang có ${Math.floor(me.gems || 0)} KC` });
+      }
+      me.gems -= item.price;
+      const inv = invOf(me);
+      inv[String(body.itemId)] = (inv[String(body.itemId)] || 0) + 1;
+      me._clientGems = me.gems;
+      me._lastSync = now; me.lastSeen = now;
+      await persist();
+      return sendJson(res, 200, { save: me, inv, itemId: String(body.itemId) });
+    }
+
+    /* ---- POST /api/market/use {playerId, itemId} ----
+     * Dùng vật phẩm trong túi: server kiểm túi, trừ 1 rồi áp hiệu ứng thật.
+     * Rương vàng tính theo gps thật như rương ads; x2 thu nhập trả số phút
+     * về cho client áp vào boostUntil (cơ chế phía client như boost ads). */
+    if (req.method === 'POST' && url.pathname === '/api/market/use') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('market:' + playerId, 30, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const itemId = String(body.itemId || '');
+      if (!MARKET_ITEMS[itemId]) return sendJson(res, 400, { error: 'Vật phẩm không tồn tại' });
+      const me = getOrCreatePlayer(playerId, now);
+      const inv = invOf(me);
+      if ((inv[itemId] || 0) < 1) {
+        return sendJson(res, 400, { error: 'Bạn không có vật phẩm này trong túi — mua ở chợ trước nhé' });
+      }
+      const effect = {};
+      if (itemId === 'shield4' || itemId === 'shield24') {
+        const r = raidStateOf(me, now);
+        const dur = itemId === 'shield4' ? 4 * 3600e3 : 24 * 3600e3;
+        r.shieldUntil = Math.max(now, r.shieldUntil || 0) + dur;
+        effect.shieldUntil = r.shieldUntil;
+      } else if (itemId === 'raid_ticket') {
+        const r = raidStateOf(me, now);
+        r.bonus = (r.bonus || 0) + 1;
+        effect.attacksLeft = raidInfoFor(me, now).attacksLeft;
+      } else if (itemId === 'spin_ticket') {
+        const { wheel } = wheelStateOf(me, now);
+        if (wheel.spins >= WHEEL_SPIN_CAP) {
+          return sendJson(res, 400, { error: `Bạn đang đầy ${WHEEL_SPIN_CAP} lượt quay rồi — quay bớt rồi dùng vé sau nhé` });
+        }
+        wheel.spins += 1;
+        effect.spins = wheel.spins;
+      } else if (itemId === 'boost30') {
+        effect.boostMins = 30;
+      } else if (itemId === 'gold_chest') {
+        const gps = gpsOf(me) + extraGpsOf(extrasOf(me.tasks));
+        const reward = Math.min(AD_CHEST_CAP, Math.max(AD_CHEST_MIN, Math.round(gps * AD_CHEST_SECONDS)));
+        me.gold += reward;
+        me._clientGold = me.gold;
+        effect.gold = reward;
+      }
+      inv[itemId] -= 1;
+      if (inv[itemId] <= 0) delete inv[itemId];
+      me._lastSync = now; me.lastSeen = now;
+      await persist();
+      return sendJson(res, 200, { save: me, inv, itemId, effect });
+    }
+
     /* ---- POST /api/level-claim {playerId, level} ----
      * Nhận thưởng MỐC CẤP người chơi (10/20/30/40/50): server tự tính cấp
      * thật từ totalEarned của chính mình (không tin client khai), mốc phải
@@ -1460,7 +1577,7 @@ const server = http.createServer(async (req, res) => {
       }
       const me = getOrCreatePlayer(playerId, now);
       const myRaid = raidStateOf(me, now);
-      if (myRaid.used >= RAID_DAILY_MAX) {
+      if (myRaid.used >= RAID_DAILY_MAX + (myRaid.bonus || 0)) {
         return sendJson(res, 400, { error: `Bạn đã hết lượt đột kích hôm nay (${RAID_DAILY_MAX} lượt/ngày) — mai quay lại nhé` });
       }
       const myEarned = me.totalEarned || 0;
@@ -1507,7 +1624,7 @@ const server = http.createServer(async (req, res) => {
       }
       const me = getOrCreatePlayer(playerId, now);
       const myRaid = raidStateOf(me, now);
-      if (myRaid.used >= RAID_DAILY_MAX) {
+      if (myRaid.used >= RAID_DAILY_MAX + (myRaid.bonus || 0)) {
         return sendJson(res, 400, { error: `Bạn đã hết lượt đột kích hôm nay (${RAID_DAILY_MAX} lượt/ngày) — mai quay lại nhé` });
       }
       const pending = myRaid.pending;
@@ -1681,7 +1798,7 @@ const server = http.createServer(async (req, res) => {
       }
       else if (seg.key === 'raid_ticket') {
         const r = raidStateOf(me, now);
-        r.used = Math.max(0, r.used - 1);
+        r.bonus = (r.bonus || 0) + 1; // +1 lượt đánh hôm nay (cộng dồn được cả khi chưa đánh lượt nào)
       }
       else if (seg.key === 'steal') {
         const candidates = Object.values(data.players).filter((q) => q && q.playerId !== playerId
