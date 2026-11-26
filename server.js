@@ -1900,6 +1900,55 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { top, own, total: ranked.length });
     }
 
+    /* ---- GET /api/ref-leaderboard?playerId= ----
+     * Bảng xếp hạng GIỚI THIỆU BẠN: xếp theo số BẠN CHĂM (người được mời đã
+     * đào >= REFERRAL_MILESTONE_EARNED — cùng tiêu chí mốc thưởng ref), hòa
+     * thì so tổng số bạn đã mời, rồi tài khoản tạo sớm hơn. Chỉ người đã mời
+     * >= 1 bạn mới được xếp hạng. Trả Top 50 + hạng của chính người hỏi
+     * (rank = null nếu chưa mời ai). Chỉ lộ tên + cấp + số bạn như bảng vàng. */
+    if (req.method === 'GET' && url.pathname === '/api/ref-leaderboard') {
+      const pid = url.searchParams.get('playerId') || '';
+      if (pid && !requestAuthorizedFor(req, pid)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('lb:' + clientIp(req), 60, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      // Đếm 1 lượt duyệt: mỗi người mời -> {total, active}
+      const counts = new Map();
+      for (const p of Object.values(data.players)) {
+        if (!p || !p.referredBy) continue;
+        const c = counts.get(p.referredBy) || { total: 0, active: 0 };
+        c.total++;
+        if ((p.totalEarned || 0) >= REFERRAL_MILESTONE_EARNED) c.active++;
+        counts.set(p.referredBy, c);
+      }
+      const ranked = Object.values(data.players)
+        .filter((p) => p && counts.has(p.playerId))
+        .sort((a, b) => {
+          const ca = counts.get(a.playerId), cb = counts.get(b.playerId);
+          return (cb.active - ca.active) || (cb.total - ca.total) || ((a.createdAt || 0) - (b.createdAt || 0));
+        });
+      const pub = (p, rank) => {
+        const c = counts.get(p.playerId) || { total: 0, active: 0 };
+        return {
+          rank,
+          name: (typeof p.displayName === 'string' && p.displayName) || ('Thợ mỏ #' + String(p.referralCode || p.playerId || '????').slice(-4).toUpperCase()),
+          level: playerLevelOf(p.totalEarned),
+          active: c.active,
+          total: c.total,
+          me: !!pid && p.playerId === pid,
+        };
+      };
+      const top = ranked.slice(0, 50).map((p, i) => pub(p, i + 1));
+      let own = null;
+      if (pid && data.players[pid]) {
+        const idx = ranked.findIndex((p) => p.playerId === pid);
+        own = pub(data.players[pid], idx >= 0 ? idx + 1 : null);
+      }
+      return sendJson(res, 200, { top, own, total: ranked.length });
+    }
+
     /* ---- POST /api/telegram-webhook (Bot Telegram: chào khi /start) ---- */
     if (req.method === 'POST' && url.pathname === '/api/telegram-webhook') {
       if (!BOT_TOKEN) return sendJson(res, 404, { error: 'Bot chưa được bật' });
