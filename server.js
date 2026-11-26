@@ -152,6 +152,22 @@ function invOf(p) {
   if (!p.inv || typeof p.inv !== 'object') p.inv = {};
   return p.inv;
 }
+/* Khung ảnh đại diện: mở khóa theo CẤP NGƯỜI CHƠI (playerLevelOf) hoặc
+ * mua đứt bằng KC ở Chợ. Danh sách ĐÃ MUA lưu ở p.framesOwned; khung mở
+ * bằng cấp tính động nên không cần lưu. Khung đang đeo (frameId) là thẩm
+ * mỹ phía client (extras __tmv) — server chỉ quản quyền sở hữu. */
+const FRAMES = {
+  vang: { price: 800, level: 20 },      // Vàng Hoàng Gia
+  ngoc: { price: 1500, level: 30 },     // Ngọc Lục Bảo
+  neon: { price: 2500, level: 40 },     // Neon Cyber
+  cauvong: { price: 4000, level: 50 },  // Cầu Vồng Huyền Thoại
+};
+function framesOwnedOf(p) {
+  const owned = new Set(Array.isArray(p.framesOwned) ? p.framesOwned : []);
+  const lvl = playerLevelOf(p.totalEarned || 0);
+  for (const [id, f] of Object.entries(FRAMES)) if (lvl >= f.level) owned.add(id);
+  return [...owned];
+}
 // Thứ tự ô trên vòng quay — client (App.tsx WHEEL_SEGMENTS) PHẢI giữ đúng thứ tự này.
 const WHEEL_SEGMENTS = [
   { key: 'gold_small', weight: 26 },
@@ -631,6 +647,7 @@ function newSave(playerId, now) {
     island: { no: 1, buildings: [0, 0, 0, 0, 0], log: [], week: { key: '', score: 0, at: 0 } }, // Đảo Vàng: số đảo + cấp 5 công trình + nhật ký + điểm đua tuần — server là nguồn sự thật
     wheel: { date: '', spins: 0, adUsed: 0 }, // Vòng quay: ngày VN, lượt quay đang có, lượt ads đã dùng hôm nay — server là nguồn sự thật
     inv: {},                  // Túi đồ chợ vật phẩm: { itemId: số lượng } — server là nguồn sự thật, client không khai được
+    framesOwned: [],          // Khung đại diện ĐÃ MUA bằng KC (khung mở bằng cấp tính động, không lưu ở đây)
     _burst: 15000,            // ngân sách chống gian lận còn lại (xem POST /api/save)
     _burstGems: 2000,         // ngân sách KC theo thời gian (vá 2026-11-24)
     friendsCount: 0,
@@ -1426,8 +1443,10 @@ const server = http.createServer(async (req, res) => {
       }
       const prices = {};
       for (const [id, it] of Object.entries(MARKET_ITEMS)) prices[id] = it.price;
+      const framePrices = {};
+      for (const [id, f] of Object.entries(FRAMES)) framePrices[id] = { price: f.price, level: f.level };
       const me = pid ? data.players[pid] : null;
-      return sendJson(res, 200, { prices, inv: me ? invOf(me) : {} });
+      return sendJson(res, 200, { prices, inv: me ? invOf(me) : {}, framePrices, framesOwned: me ? framesOwnedOf(me) : [] });
     }
 
     /* ---- POST /api/market/buy {playerId, itemId} ----
@@ -1456,6 +1475,38 @@ const server = http.createServer(async (req, res) => {
       me._lastSync = now; me.lastSeen = now;
       await persist();
       return sendJson(res, 200, { save: me, inv, itemId: String(body.itemId) });
+    }
+
+    /* ---- POST /api/market/buy-frame {playerId, frameId} ----
+     * Mua đứt khung đại diện bằng KC (con đường thứ hai — con đường đầu là
+     * đạt cấp mở khóa). Server chặn mua trùng cả hai nguồn sở hữu. */
+    if (req.method === 'POST' && url.pathname === '/api/market/buy-frame') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('market:' + playerId, 30, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const frameId = String(body.frameId || '');
+      const frame = FRAMES[frameId];
+      if (!frame) return sendJson(res, 400, { error: 'Khung không tồn tại' });
+      const me = getOrCreatePlayer(playerId, now);
+      if (framesOwnedOf(me).includes(frameId)) {
+        return sendJson(res, 400, { error: 'Bạn đã có khung này rồi (đã mở khóa bằng cấp hoặc đã mua trước đó)' });
+      }
+      if ((me.gems || 0) < frame.price) {
+        return sendJson(res, 400, { error: `Không đủ kim cương — khung này giá ${frame.price} KC, bạn đang có ${Math.floor(me.gems || 0)} KC` });
+      }
+      me.gems -= frame.price;
+      if (!Array.isArray(me.framesOwned)) me.framesOwned = [];
+      me.framesOwned.push(frameId);
+      me._clientGems = me.gems;
+      me._lastSync = now; me.lastSeen = now;
+      await persist();
+      return sendJson(res, 200, { save: me, frameId, framesOwned: framesOwnedOf(me) });
     }
 
     /* ---- POST /api/market/use {playerId, itemId} ----
