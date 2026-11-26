@@ -61,7 +61,7 @@ function playerLevelOf(totalEarned) {
   return lv;
 }
 /* ---------------- PvP ĐỘT KÍCH MỎ (hằng số + hàm phụ) ---------------- */
-const RAID_DAILY_MAX = 10;             // lượt tấn công miễn phí mỗi ngày (theo ngày giờ VN) — Kien tăng 5 -> 10 ngày 2026-11-26
+const RAID_DAILY_MAX = 15;             // lượt tấn công miễn phí mỗi ngày (theo ngày giờ VN) — 5 -> 10 -> 15 (Kien chốt 15 ngày 2026-11-26 sau sự cố nút vé khuất)
 const RAID_SHIELD_MS = 4 * 3600e3;     // khiên 4 giờ sau khi bị cướp thành công
 const RAID_MIN_TARGET_GOLD = 50000;    // đối thủ phải có ít nhất chừng này vàng mới bị nhắm
 const RAID_MIN_TARGET_EARNED = 100000; // tân thủ (tổng đào < 100.000) được miễn đột kích
