@@ -908,6 +908,7 @@ function publicWithdrawal(w) {
     gold: w.gold,
     vnd: w.vnd,
     sanctioned: !!w.sanctioned, // true = đơn bị tịch thu khi reset tài khoản gian lận (không hoàn vàng)
+    note: w.note || '', // ghi chú của chủ game khi xử lý đơn (người chơi thấy trong lịch sử rút)
     status: withdrawalStatusOf(w),
     createdAt: w.createdAt,
     processedAt: w.processedAt || null,
@@ -1413,6 +1414,11 @@ const server = http.createServer(async (req, res) => {
       }
       wd.status = action;
       wd.processedAt = now;
+      // Ghi chú của chủ game gửi kèm cho người chơi (vd: lý do từ chối — điền
+      // sai thông tin). Làm sạch: bỏ ký tự điều khiển, gộp khoảng trắng, tối đa
+      // 300 ký tự. Chỉ lưu khi có nội dung.
+      const adminNote = String(body.note ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
+      if (adminNote) wd.note = adminNote;
       if (action === 'rejected') {
         // Cộng thẳng vào bản ghi server của người chơi. KHÔNG đụng _clientGold:
         // cơ chế gộp delta ở POST /api/save sẽ giữ khoản hoàn này cho họ kể cả
