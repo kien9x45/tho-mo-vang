@@ -107,7 +107,7 @@ function raidStateOf(p, now) {
 function raidPowerOf(p) {
   const extras = extrasOf(p.tasks);
   const clickLevel = extras && Number.isFinite(extras.clickLevel) ? Math.min(500, Math.max(1, Math.floor(extras.clickLevel))) : 1;
-  return { gps: gpsOf(p) + extraGpsOf(extras), tap: clickLevel };
+  return { gps: gpsOf(p), tap: clickLevel };
 }
 function playerDisplayName(p) {
   return (typeof p.displayName === 'string' && p.displayName) || ('Thợ mỏ #' + String(p.referralCode || p.playerId || '????').slice(-4).toUpperCase());
@@ -184,7 +184,7 @@ function goldPriceOf(item, gps) {
   return Math.max(GOLD_PRICE_MIN, Math.round((gps * item.goldSecs) / 100) * 100);
 }
 function totalGpsOf(p) {
-  return gpsOf(p) + extraGpsOf(extrasOf(p.tasks));
+  return gpsOf(p);
 }
 function invOf(p) {
   if (!p.inv || typeof p.inv !== 'object') p.inv = {};
@@ -708,13 +708,35 @@ async function initStorage() {
 function minerCost(type, owned) {
   return Math.floor(type.baseCost * Math.pow(1.15, owned));
 }
-function gpsOf(save) {
-  let gps = BASE_RATE + RATE_PER_LEVEL * (save.minerLevel || 1);
-  for (const m of MINERS) {
-    const n = (save.miners && save.miners[m.id]) || 0;
-    gps += m.gps * n;
+/* ---- Luật quá tải đội thợ (Kien chốt 2026-11-28): đội quá đông thì quản
+ * lý kém hiệu quả. TỔNG số thợ (gồm robot/AI — mỗi loại client-only tính
+ * tối đa 5, đúng như khi tính gps) trên 50 → hiệu suất ĐỘI THỢ còn 70%,
+ * trên 100 → còn 45%. Thợ chính theo cấp không bị giảm. Áp mọi người chơi. */
+function fleetSizeOf(save, extras) {
+  let n = 0;
+  for (const m of MINERS) n += Math.max(0, Math.floor((save.miners && save.miners[m.id]) || 0));
+  if (extras && extras.ownedExtra) {
+    for (const id of Object.keys(EXTRA_MINERS)) n += Math.min(5, Math.max(0, Math.floor(extras.ownedExtra[id] || 0)));
   }
-  return gps;
+  return n;
+}
+function congestionFactor(size) { return size > 100 ? 0.45 : size > 50 ? 0.7 : 1; }
+function minersFleetGpsOf(save) {
+  let g = 0;
+  for (const m of MINERS) g += m.gps * ((save.miners && save.miners[m.id]) || 0);
+  return g;
+}
+function gpsOf(save) {
+  const extras = extrasOf(save.tasks);
+  const main = BASE_RATE + RATE_PER_LEVEL * (save.minerLevel || 1);
+  const fleet = minersFleetGpsOf(save) + extraGpsOf(extras);
+  return main + fleet * congestionFactor(fleetSizeOf(save, extras));
+}
+// Thu nhập offline giữ cách tính cũ (không gồm robot/AI) nhưng vẫn chịu quá tải.
+function offlineGpsOf(save) {
+  const extras = extrasOf(save.tasks);
+  const main = BASE_RATE + RATE_PER_LEVEL * (save.minerLevel || 1);
+  return main + minersFleetGpsOf(save) * congestionFactor(fleetSizeOf(save, extras));
 }
 /* ---- Vá chống gian lận 2026-11-24: kiểm chứng việc MUA THỢ phía server ----
  * Giá thuê THẬT phía client (App.tsx MINERS, tăng x1.15 mỗi con đã có) — bảng
@@ -973,7 +995,7 @@ function applyOffline(save, now) {
     const sessionLeftAtLeave = Math.floor((save.sessionEnd - last) / 1000);
     inSession = Math.min(seconds, Math.max(0, sessionLeftAtLeave));
   }
-  const earned = Math.floor(gpsOf(save) * inSession * OFFLINE_RATE);
+  const earned = Math.floor(offlineGpsOf(save) * inSession * OFFLINE_RATE);
   if (earned > 0) {
     save.gold += earned;
     save.totalEarned = (save.totalEarned || 0) + earned;
@@ -1117,7 +1139,7 @@ const server = http.createServer(async (req, res) => {
       let clickLevel = 1;
       const clRaw = (incExtras && incExtras.clickLevel) || (storedExtras && storedExtras.clickLevel);
       if (Number.isFinite(clRaw)) clickLevel = Math.min(500, Math.max(1, Math.floor(clRaw)));
-      const refill = ((gpsOf(save) + extraGpsOf(storedExtras)) * 2 + Math.max(10, clickLevel * 10)) * dtSec;
+      const refill = (gpsOf(save) * 2 + Math.max(10, clickLevel * 10)) * dtSec;
       if (!Number.isFinite(save._burst)) save._burst = 100000;
       const allowance = Math.min(600000, save._burst + refill);
       // Số thợ tăng lên phải TRẢ ĐỦ TIỀN: tổng giá các thợ mới (tính theo giá
@@ -1724,7 +1746,7 @@ const server = http.createServer(async (req, res) => {
       if (me.adChestCount >= AD_CHEST_DAILY_MAX) {
         return sendJson(res, 429, { error: `Hôm nay bạn đã mở đủ ${AD_CHEST_DAILY_MAX} rương vàng rồi — mai quay lại nhé`, chestLeft: 0 });
       }
-      const gps = gpsOf(me) + extraGpsOf(extrasOf(me.tasks));
+      const gps = gpsOf(me);
       const reward = Math.min(AD_CHEST_CAP, Math.max(AD_CHEST_MIN, Math.round(gps * AD_CHEST_SECONDS)));
       me.gold += reward;
       me.lastAdChestAt = now;
@@ -1902,7 +1924,7 @@ const server = http.createServer(async (req, res) => {
       } else if (itemId === 'boost30') {
         effect.boostMins = 30;
       } else if (itemId === 'gold_chest') {
-        const gps = gpsOf(me) + extraGpsOf(extrasOf(me.tasks));
+        const gps = gpsOf(me);
         const reward = Math.min(MARKET_CHEST_CAP, Math.max(AD_CHEST_MIN, Math.round(gps * AD_CHEST_SECONDS)));
         me.gold += reward;
         me._clientGold = me.gold;
@@ -2258,7 +2280,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 400, { error: 'Hết lượt quay rồi — xem ads lấy thêm lượt hoặc mai quay lại nhé' });
       }
       wheel.spins -= 1;
-      const gps = gpsOf(me) + extraGpsOf(extrasOf(me.tasks));
+      const gps = gpsOf(me);
       const goldByGps = (secs, min, cap) => Math.min(cap, Math.max(min, Math.round(gps * secs)));
       let roll = Math.random() * 100;
       let segIdx = WHEEL_SEGMENTS.length - 1;
