@@ -1350,6 +1350,9 @@ const server = http.createServer(async (req, res) => {
       }
       if (!BANKS.includes(bank) && method !== 'momo') return sendJson(res, 400, { error: 'Ngân hàng/ví không hợp lệ' });
       if (!account || !name) return sendJson(res, 400, { error: 'Thiếu số tài khoản hoặc tên người nhận' });
+      if ((bank === 'MoMo' || method === 'momo') && !/^0\d{9}$/.test(account)) {
+        return sendJson(res, 400, { error: 'Số ví MoMo phải là số điện thoại 10 số bắt đầu bằng 0' });
+      }
       if (save.gold < gold) return sendJson(res, 400, { error: 'Không đủ vàng để rút' });
       save.gold -= gold;
       const wd = {
