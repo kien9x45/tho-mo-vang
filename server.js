@@ -267,10 +267,17 @@ const ISLAND_RACE_PRIZES = [
   { gold: 300000, gems: 3000 },  // Top 2
   { gold: 200000, gems: 2000 },  // Top 3
   { gold: 100000, gems: 1000 },  // Top 4–10
+  { gold: 50000, gems: 500 },    // Top 11–20 — mở rộng 2026-11-27 theo chốt của chủ game
 ];
+// Quà THAM GIA đua đảo: xây từ 10 cấp trong tuần mà nằm ngoài Top 10 vẫn có
+// quà (hạng 11–20 được cộng thêm vào giải hạng) — giữ chân nhóm đua phía
+// dưới thay vì chỉ thưởng nhóm đầu. Chốt của chủ game 2026-11-27.
+const ISLAND_RACE_JOIN = { score: 10, gold: 30000, gems: 300 };
 function islandRacePrizeFor(rank) {
-  if (rank < 1 || rank > 10) return null;
-  return ISLAND_RACE_PRIZES[Math.min(rank, 4) - 1];
+  if (rank < 1 || rank > 20) return null;
+  if (rank <= 3) return ISLAND_RACE_PRIZES[rank - 1];
+  if (rank <= 10) return ISLAND_RACE_PRIZES[3];
+  return ISLAND_RACE_PRIZES[4];
 }
 function weekMondayOf(now) { // {key: 'YYYY-MM-DD' của thứ Hai, endsAt: ms lúc tuần kết thúc}
   const d = new Date(now + 7 * 3600e3);
@@ -302,17 +309,29 @@ async function settleIslandRaceIfNeeded(now) {
   }
   if (data.islandRace.weekKey === currentKey) return;
   const settledKey = data.islandRace.weekKey;
-  const winners = raceRowsFor(settledKey).slice(0, 10).map((r, i) => {
-    const prize = islandRacePrizeFor(i + 1);
+  const winners = [];
+  let extraPaid = 0; // số người nhận giải hạng 11–20
+  let joinPaid = 0;  // số người nhận quà tham gia (ngoài Top 10, xây ≥10 cấp)
+  raceRowsFor(settledKey).forEach((r, i) => {
+    const rank = i + 1;
+    const prize = islandRacePrizeFor(rank);
+    const join = rank > 10 && r.score >= ISLAND_RACE_JOIN.score ? ISLAND_RACE_JOIN : null;
+    const gold = (prize ? prize.gold : 0) + (join ? join.gold : 0);
+    const gems = (prize ? prize.gems : 0) + (join ? join.gems : 0);
     const p = data.players[r.playerId];
-    if (p && prize) {
-      p.gold = (p.gold || 0) + prize.gold;
-      p.gems = (p.gems || 0) + prize.gems;
+    if (p && (gold > 0 || gems > 0)) {
+      p.gold = (p.gold || 0) + gold;
+      p.gems = (p.gems || 0) + gems;
       p._clientGold = p.gold; p._clientGems = p.gems; // đồng bộ delta cho client của người thắng
     }
-    return { rank: i + 1, name: r.name, islandNo: r.islandNo, score: r.score, gold: prize ? prize.gold : 0, gems: prize ? prize.gems : 0 };
+    if (rank <= 10) {
+      winners.push({ rank, name: r.name, islandNo: r.islandNo, score: r.score, gold: prize ? prize.gold : 0, gems: prize ? prize.gems : 0 });
+    } else {
+      if (prize) extraPaid++;
+      if (join) joinPaid++;
+    }
   });
-  data.islandRace = { weekKey: currentKey, last: { weekKey: settledKey, winners } };
+  data.islandRace = { weekKey: currentKey, last: { weekKey: settledKey, winners, extraPaid, joinPaid } };
   await persist();
 }
 
@@ -2125,7 +2144,8 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         weekKey: key,
         endsAt,
-        prizes: [1, 2, 3, 4].map((r) => ({ rank: r, gold: islandRacePrizeFor(r).gold, gems: islandRacePrizeFor(r).gems })),
+        prizes: [1, 2, 3, 4, 11].map((r) => ({ rank: r, gold: islandRacePrizeFor(r).gold, gems: islandRacePrizeFor(r).gems })),
+        joinPrize: ISLAND_RACE_JOIN,
         top: rows.slice(0, 10).map(pub),
         own: myIdx >= 0 ? pub(rows[myIdx], myIdx) : null,
         total: rows.length,
