@@ -333,7 +333,7 @@ async function settleIslandRaceIfNeeded(now) {
     }
   });
   data.islandRace = { weekKey: currentKey, last: { weekKey: settledKey, winners, extraPaid, joinPaid } };
-  await persist();
+  await persistNow();
 }
 
 // Thưởng MỐC mỗi 10 cấp — nhận 1 lần, server kiểm chứng cấp thật rồi mới trả.
@@ -559,13 +559,7 @@ let data = emptyData();
 // Hàng đợi ghi Neon: các lần ghi chạy nối tiếp nhau, không ghi chồng.
 // Mỗi lần ghi chụp toàn bộ state tại thời điểm ghi thực tế nên luôn lưu bản mới nhất.
 let writeChain = Promise.resolve();
-function persist() {
-  if (!USE_NEON) {
-    const tmp = DATA_FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-    fs.renameSync(tmp, DATA_FILE);
-    return Promise.resolve();
-  }
+function writeSnapshotNow() {
   const p = writeChain.then(async () => {
     const snapshot = JSON.stringify(data);
     await neonQuery(
@@ -577,6 +571,61 @@ function persist() {
   // Giữ chuỗi không bị gãy khi 1 lần ghi lỗi; lỗi vẫn được báo cho lần ghi đang chờ (p)
   writeChain = p.catch(() => {});
   return p;
+}
+
+/* ---- Vá băng thông 2026-11-27: ghi gộp (write-behind) ----
+ * persist() thường: chỉ đánh dấu "bẩn" và hẹn ghi gộp sau tối đa PERSIST_FLUSH_MS —
+ * hàng chục lần gọi trong cửa sổ đó chỉ tốn 1 lần ghi toàn bộ state lên Neon.
+ * (Bản cũ ghi ngay mỗi lần gọi → 8,44 GB "Service-Initiated" trong 4 ngày trên Render,
+ * là nguyên nhân thật làm workspace hết 5 GB băng thông free và bị suspend.)
+ * persistNow(): ghi NGAY và chờ xong — dùng cho các thao tác tiền/dùng-1-lần:
+ * rút tiền, duyệt/trả rút, mã quà (tạo/nhận), công cụ owner (reset/adjust/credit), chốt đua đảo.
+ * Khi tiến trình nhận SIGTERM/SIGINT (systemd stop/restart, deploy) sẽ flush lần cuối
+ * trước khi thoát, nên cửa sổ mất dữ liệu thực tế chỉ còn khi sập nguồn/kill -9. */
+const PERSIST_FLUSH_MS = 5000;
+let persistDirty = false;
+let persistTimer = null;
+function schedulePersist() {
+  if (persistTimer || !USE_NEON) return;
+  persistTimer = setTimeout(() => { persistTimer = null; flushPersist(); }, PERSIST_FLUSH_MS);
+  if (persistTimer.unref) persistTimer.unref();
+}
+async function flushPersist() {
+  if (!persistDirty) return;
+  persistDirty = false;
+  try {
+    await writeSnapshotNow();
+  } catch (e) {
+    persistDirty = true; // ghi lỗi -> giữ bẩn để lần hẹn sau thử lại
+    console.error('persist flush failed:', e && e.message ? e.message : e);
+    schedulePersist();
+  }
+}
+function persist() {
+  if (!USE_NEON) {
+    const tmp = DATA_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+    fs.renameSync(tmp, DATA_FILE);
+    return Promise.resolve();
+  }
+  persistDirty = true;
+  schedulePersist();
+  return Promise.resolve();
+}
+async function persistNow() {
+  if (!USE_NEON) return persist();
+  if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
+  persistDirty = true;
+  await flushPersist();
+}
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, async () => {
+    try {
+      if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
+      await Promise.race([flushPersist(), sleep(4000)]);
+    } catch (_) { /* bỏ qua */ }
+    process.exit(0);
+  });
 }
 
 async function initStorage() {
@@ -1172,7 +1221,7 @@ const server = http.createServer(async (req, res) => {
       save.gems += gift.gems || 0;
       save._clientGold = save.gold; save._clientGems = save.gems; // client nhận số dư này trong đáp
       save._lastSync = now; save.lastSeen = now;
-      await persist();
+      await persistNow();
       return sendJson(res, 200, { save, reward: { gold: gift.gold || 0, gems: gift.gems || 0 } });
     }
 
@@ -1198,7 +1247,7 @@ const server = http.createServer(async (req, res) => {
           maxUses = n;
         }
         data.giftCodes[code] = { gold, gems, createdAt: now, maxUses };
-        await persist();
+        await persistNow();
         return sendJson(res, 200, { ok: true, code, gold, gems, maxUses });
       }
       if (req.method === 'GET') {
@@ -1251,7 +1300,7 @@ const server = http.createServer(async (req, res) => {
       data.withdrawals.push(wd);
       save._clientGold = save.gold; save._clientGems = save.gems; // client nhận số dư này trong đáp
       save._lastSync = now; save.lastSeen = now;
-      await persist();
+      await persistNow();
       return sendJson(res, 200, { save, withdrawal: publicWithdrawal(wd) });
     }
 
@@ -1301,7 +1350,7 @@ const server = http.createServer(async (req, res) => {
         const player = data.players[wd.playerId];
         if (player) player.gold += wd.gold;
       }
-      await persist();
+      await persistNow();
       return sendJson(res, 200, { ok: true, withdrawal: publicWithdrawal(wd) });
     }
 
@@ -1341,7 +1390,7 @@ const server = http.createServer(async (req, res) => {
       fresh.resets = (old.resets || 0) + 1;
       fresh.lastResetAt = now;
       data.players[pid] = fresh;
-      await persist();
+      await persistNow();
       return sendJson(res, 200, { ok: true, playerId: pid, confiscated, resets: fresh.resets });
     }
 
@@ -1371,7 +1420,7 @@ const server = http.createServer(async (req, res) => {
       p.adjustments.push({ at: now, gold: dGold, gems: dGems, kind: 'deduct' });
       p.adjustments = p.adjustments.slice(-20);
       p.lastSeen = now;
-      await persist();
+      await persistNow();
       return sendJson(res, 200, { ok: true, playerId: pid, deducted: { gold: dGold, gems: dGems }, gold: p.gold, gems: p.gems });
     }
 
@@ -1399,7 +1448,7 @@ const server = http.createServer(async (req, res) => {
       p.adjustments.push({ at: now, gold: cGold, gems: cGems, kind: 'credit' });
       p.adjustments = p.adjustments.slice(-20);
       p.lastSeen = now;
-      await persist();
+      await persistNow();
       return sendJson(res, 200, { ok: true, playerId: pid, credited: { gold: cGold, gems: cGems }, gold: p.gold, gems: p.gems });
     }
 
