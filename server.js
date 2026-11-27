@@ -426,12 +426,12 @@ const BANKS = ['MB Bank', 'Vietcombank', 'Techcombank', 'ACB', 'BIDV', 'MoMo'];
 
 // Thợ/máy thuê đào tự động (giá vàng, cộng vàng/giây), giá tăng 15% mỗi con đã có
 const MINERS = [
-  { id: 'tap_su',   name: 'Thợ Mỏ Tập Sự',   baseCost: 150,     gps: 0.0625 },
-  { id: 'lanh_nghe', name: 'Thợ Mỏ Lành Nghề', baseCost: 1200,  gps: 0.3125 },
-  { id: 'doi_dao',  name: 'Đội Đào Vàng',    baseCost: 8000,    gps: 1.375 },
-  { id: 'may_khoan', name: 'Máy Khoan Đá',   baseCost: 45000,   gps: 7.5 },
-  { id: 'may_xuc',  name: 'Máy Xúc Vàng',    baseCost: 260000,  gps: 40.625 },
-  { id: 'gian_khoan', name: 'Giàn Khoan Vàng', baseCost: 1500000, gps: 150 }, // gps 200 -> 150 (giảm earn top, Kien chốt 2026-11-27)
+  { id: 'tap_su',   name: 'Thợ Mỏ Tập Sự',   baseCost: 60,      gps: 0.0625 },
+  { id: 'lanh_nghe', name: 'Thợ Mỏ Lành Nghề', baseCost: 450,   gps: 0.3125 },
+  { id: 'doi_dao',  name: 'Đội Đào Vàng',    baseCost: 6000,    gps: 1.375 },
+  { id: 'may_khoan', name: 'Máy Khoan Đá',   baseCost: 90000,   gps: 7.5 },
+  { id: 'may_xuc',  name: 'Máy Xúc Vàng',    baseCost: 1200000, gps: 40.625 },
+  { id: 'gian_khoan', name: 'Giàn Khoan Vàng', baseCost: 15000000, gps: 150 }, // giá 4,2tr -> 15tr (Kien chốt 2026-11-28); gps 200 -> 150 (giảm earn top, Kien chốt 2026-11-27)
 ];
 
 /* ---------------- Bot Telegram: tin chào khi người chơi bấm /start ----------------
@@ -741,10 +741,10 @@ function offlineGpsOf(save) {
 /* ---- Vá chống gian lận 2026-11-24: kiểm chứng việc MUA THỢ phía server ----
  * Giá thuê THẬT phía client (App.tsx MINERS, tăng x1.15 mỗi con đã có) — bảng
  * baseCost trong MINERS phía server là số cũ, không dùng cho kiểm tra này. */
-const MINER_CHECK_PRICES = { tap_su: 45, lanh_nghe: 300, doi_dao: 3300, may_khoan: 36000, may_xuc: 390000, gian_khoan: 4200000 };
+const MINER_CHECK_PRICES = { tap_su: 60, lanh_nghe: 450, doi_dao: 6000, may_khoan: 90000, may_xuc: 1200000, gian_khoan: 15000000 }; // tăng giá thợ chống phình đội, Kien chốt 2026-11-28
 // Hai loại thợ chỉ có phía client (đóng gói trong extras __tmv): giá + gps hiện tại.
 const EXTRA_MINERS = {
-  robot: { baseCost: 60000000, gps: 700 }, // gps 1000 -> 700 (giảm earn top, Kien chốt 2026-11-27)
+  robot: { baseCost: 180000000, gps: 700 }, // giá 60tr -> 180tr (Kien chốt 2026-11-28); gps 1000 -> 700 (giảm earn top, Kien chốt 2026-11-27)
   mo_tu_dong: { baseCost: 300000000, gps: 3500 }, // giá giảm 990tr -> 300tr theo yêu cầu Kien 2026-11-25; gps 5312.5 -> 3500 (giảm earn top, Kien chốt 2026-11-27)
 };
 // Tổng giá hình học (không làm tròn từng con) để kiểm tra khả năng chi trả.
