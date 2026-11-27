@@ -47,6 +47,8 @@ const AD_CHEST_COOLDOWN_MS = 60000;
 const AD_CHEST_DAILY_MAX = 15;  // trần rương vàng/ngày VN (vá 2026-11-27 — trước đây KHÔNG có trần ngày, chỉ cooldown 60s nên farm được)
 const AD_GEMS_REWARD = 120;     // KC miễn phí mỗi lượt xem ads — server cấp từ 2026-11-27 (trước đây client tự cộng qua save)
 const AD_GEMS_DAILY_MAX = 10;   // trần lượt nhận KC ads/ngày VN
+const MARKET_CHEST_CAP = 25000; // trần Rương vàng ở CHỢ (vá kinh tế 2026-11-28): 25.000/250 KC = tối đa 100 vàng/KC, THẤP hơn giá đổi 125 vàng/KC nên vòng lặp đổi vàng -> KC -> rương luôn LỖ; rương ADS giữ trần riêng 250.000
+const SAVE_GEMS_DAILY_CAP = 2000; // trần KC/ngày cho phần KC client tự khai qua /api/save KHÔNG có vàng chống lưng (vá 2026-11-28; thừa cho điểm danh 10 + chuỗi 300 + nhiệm vụ vài trăm/ngày)
 /* ---- Cấp độ NGƯỜI CHƠI (khác cấp thợ mua bằng KC): theo TỔNG VÀNG ĐÀO tích
  * lũy (totalEarned — server đã kẹp chống gian lận), cấp 1..100 (nâng từ 50
  * lên 100 ngày 2026-11-27, giữ nguyên công thức). Ngưỡng đạt
@@ -82,6 +84,15 @@ function adDailyOf(p, now) {
   if (p.adGemsDay !== today) { p.adGemsDay = today; p.adGemsCount = 0; }
   if (!Number.isFinite(p.adChestCount)) p.adChestCount = 0;
   if (!Number.isFinite(p.adGemsCount)) p.adGemsCount = 0;
+  return p;
+}
+/* Bộ đếm KC client tự khai qua /api/save theo NGÀY VN (vá kinh tế
+ * 2026-11-28): trần SAVE_GEMS_DAILY_CAP cho phần KC không có vàng chống
+ * lưng; tự reset khi sang ngày mới, khởi tạo tại chỗ cho người chơi cũ. */
+function gemsDailyOf(p, now) {
+  const today = vnDateOf(now);
+  if (p.gemsDay !== today) { p.gemsDay = today; p.gemsClaimed = 0; }
+  if (!Number.isFinite(p.gemsClaimed)) p.gemsClaimed = 0;
   return p;
 }
 function raidStateOf(p, now) {
@@ -350,6 +361,7 @@ const LEVEL_MILESTONE_REWARDS = {
   100: { gold: 25000000, gems: 15000 },
 };
 const REFERRAL_MILESTONE_EARNED = 100000; // cửa sổ "tài khoản còn mới" + mốc tính BẠN CHĂM (tier 1)
+const REF_INSTANT_EARNED = 10000; // thưởng NGAY cho người mời chỉ trả khi bạn mới tự đào đủ chừng này (vá chống farm nick phụ 2026-11-28)
 // 3 mốc thưởng cho người mời theo tổng đào tích lũy của TỪNG người được mời
 // (làm lại 2026-11-24, thay mốc đơn 100.000 cũ): trả dần khi bạn càng chăm.
 const REFERRAL_TIERS = [
@@ -737,6 +749,8 @@ function newSave(playerId, now) {
     lastAdChestAt: 0,         // mốc mở rương vàng ads gần nhất (ms) — cooldown phía server, client không khai được
     adChestDay: '', adChestCount: 0, // rương vàng ads: ngày VN + số rương đã mở hôm nay (trần AD_CHEST_DAILY_MAX) — server là nguồn sự thật
     adGemsDay: '', adGemsCount: 0,   // KC ads: ngày VN + số lượt đã nhận hôm nay (trần AD_GEMS_DAILY_MAX) — server là nguồn sự thật
+    gemsDay: '', gemsClaimed: 0,     // KC client tự khai qua save hôm nay (trần SAVE_GEMS_DAILY_CAP cho phần không có vàng chống lưng) — vá 2026-11-28
+    refInstantPaid: false,           // thưởng NGAY cho người mời đã trả nhờ player này chưa (chỉ có nghĩa khi referredBy khác null; bản ghi cũ không có field này -> undefined, KHÔNG trả bù) — vá 2026-11-28
     adjustments: [],                 // lịch sử owner TRỪ vàng/KC (thu hồi phần bất minh) — xem POST /api/players/adjust
     island: { no: 1, buildings: [0, 0, 0, 0, 0], log: [], week: { key: '', score: 0, at: 0 } }, // Đảo Vàng: số đảo + cấp 5 công trình + nhật ký + điểm đua tuần — server là nguồn sự thật
     wheel: { date: '', spins: 0, adUsed: 0 }, // Vòng quay: ngày VN, lượt quay đang có, lượt ads đã dùng hôm nay — server là nguồn sự thật
@@ -830,6 +844,22 @@ function payRefActiveMilestonesIfDue(inviter) {
     }
   }
   return changed;
+}
+// Trả thưởng NGAY cho người giới thiệu (+2.000 vàng/+50 KC) — TỪ 2026-11-28
+// chỉ trả khi người được mời tự đào đủ REF_INSTANT_EARNED, chống farm bằng
+// nick phụ ghi nhận ref hàng loạt. Cờ refInstantPaid PHẢI là false tường
+// minh (handler ghi nhận ref mới đặt) — bản ghi cũ không có cờ này
+// (undefined) nghĩa là người mời đã được trả theo luật cũ, không trả bù.
+function payRefInstantIfDue(save) {
+  if (!save.referredBy || save.refInstantPaid !== false) return false;
+  if ((save.totalEarned || 0) < REF_INSTANT_EARNED) return false;
+  save.refInstantPaid = true;
+  const inviter = data.players[save.referredBy];
+  if (!inviter || inviter.playerId === save.playerId) return false;
+  inviter.gold += REFERRAL_INVITER_REWARD.gold;
+  inviter.gems += REFERRAL_INVITER_REWARD.gems;
+  inviter.friendsCount = friendsCountOf(inviter.playerId);
+  return true;
 }
 // Trả các tier thưởng cho người giới thiệu theo tổng đào tích lũy của người
 // được mời (3 tier leo thang). Người giới thiệu offline vẫn được cộng thẳng
@@ -986,6 +1016,7 @@ const server = http.createServer(async (req, res) => {
       }
       const save = getOrCreatePlayer(String(playerId), now);
       const offlineEarned = applyOffline(save, now);
+      payRefInstantIfDue(save); // thưởng ngay cho người mời nếu bạn này vừa đào đủ mốc
       payRefTiersIfDue(save); // vàng offline cũng tính vào tổng đào tích lũy
       payRefActiveMilestonesIfDue(save);
       save.friendsCount = friendsCountOf(save.playerId);
@@ -1098,10 +1129,13 @@ const server = http.createServer(async (req, res) => {
       // mốc của chính nó, nên save cũ đến trễ sau một khoản server cộng cũng không
       // xoá được khoản cộng đó, bất kể thứ tự xử lý. Thiếu mốc (bundle cũ) thì
       // dùng _clientGold phía server làm mốc dự phòng.
+      let goldDeltaReported = 0; // delta vàng client báo kỳ này (dùng để tính phần KC có vàng chống lưng ở khối KC dưới)
+      const goldBeforeSave = save.gold; // số dư vàng server TRƯỚC save này — trần cho phần vàng chống lưng (client không báo khống quá số dư thật được)
       if (inc.gold !== undefined) {
         const base = Number.isFinite(inc.baseGold) ? inc.baseGold
           : (Number.isFinite(save._clientGold) ? save._clientGold : save.gold);
-        let delta = inc.gold - base;
+        goldDeltaReported = inc.gold - base;
+        let delta = goldDeltaReported;
         const cap = allowance - hireCost;
         if (delta > cap) delta = Math.floor(cap);
         save.gold = Math.max(0, Math.floor(save.gold + delta));
@@ -1112,21 +1146,46 @@ const server = http.createServer(async (req, res) => {
       }
       // KC tăng cũng theo NGÂN SÁCH THỜI GIAN như vàng (vá 2026-11-24): trần
       // cũ +20.000/lần lưu không gắn thời gian nên script gửi save liên tục
-      // bơm KC không giới hạn. Nguồn KC hợp lệ phía client rất chậm (quảng
-      // cáo +120/lượt xem, điểm danh +5/ngày) nên nạp 30 + 5/giây, trần
-      // 20.000 là rộng rãi cho người chơi thật.
+      // bơm KC không giới hạn. VÁ TIẾP 2026-11-28: (1) bỏ khoản nạp phẳng
+      // +30/lần lưu — chỉ nạp 5/giây theo thời gian thật, vì khoản phẳng
+      // khiến script gửi save tối đa bơm ~105 KC/giây; (2) thêm TRẦN NGÀY
+      // SAVE_GEMS_DAILY_CAP cho phần KC KHÔNG có vàng chống lưng (điểm
+      // danh +10, chuỗi 7 ngày +300, nhiệm vụ vài trăm/ngày đều dưới trần).
+      // Phần KC có vàng chống lưng = client đổi vàng -> KC ngay trong UI
+      // (delta vàng âm tương ứng, tỉ lệ 125:1): đó là hoán đổi chứ không
+      // phải phát hành, và sau khi rương Chợ bị trần 100 vàng/KC thì hoán
+      // đổi vòng tròn luôn lỗ — cho qua không trần ngày.
       if (!Number.isFinite(save._burstGems)) save._burstGems = 2000;
-      const gemsAllowance = Math.min(maxGemsGain, save._burstGems + 30 + dtSec * 5);
+      const gemsAllowance = Math.min(maxGemsGain, save._burstGems + dtSec * 5);
       let rawGemsDelta = 0;
       if (inc.gems !== undefined) {
         const base = Number.isFinite(inc.baseGems) ? inc.baseGems
           : (Number.isFinite(save._clientGems) ? save._clientGems : save.gems);
         rawGemsDelta = inc.gems - base;
         let delta = rawGemsDelta;
-        if (delta > gemsAllowance) delta = Math.floor(gemsAllowance);
+        let unbackedUsed = 0;
+        if (delta > 0) {
+          // Phần KC có VÀNG CHỐNG LƯNG: client vừa tiêu vàng thật trong cùng
+          // save này (đổi vàng -> KC trong UI, 125 vàng/KC), giới hạn bởi
+          // số dư vàng server trước save — hoán đổi 1 chiều, không trần.
+          const backed = goldDeltaReported < 0
+            ? Math.floor(Math.min(-goldDeltaReported, goldBeforeSave) / EXCHANGE_RATE)
+            : 0;
+          const backedApplied = Math.min(delta, backed);
+          // Phần KHÔNG chống lưng (điểm danh/nhiệm vụ/chuỗi do client cộng):
+          // qua cả ngân sách thời gian lẫn trần ngày.
+          const unbackedWanted = delta - backedApplied;
+          if (unbackedWanted > 0) {
+            gemsDailyOf(save, now);
+            const room = Math.max(0, SAVE_GEMS_DAILY_CAP - save.gemsClaimed);
+            unbackedUsed = Math.min(unbackedWanted, Math.floor(gemsAllowance), room);
+            save.gemsClaimed += unbackedUsed;
+          }
+          delta = backedApplied + unbackedUsed;
+        }
         save.gems = Math.max(0, Math.floor(save.gems + delta));
         save._clientGems = save.gems;
-        save._burstGems = Math.max(0, gemsAllowance - Math.max(0, delta));
+        save._burstGems = Math.max(0, gemsAllowance - unbackedUsed);
       } else {
         save._burstGems = gemsAllowance;
       }
@@ -1160,6 +1219,7 @@ const server = http.createServer(async (req, res) => {
         // phiên tối đa 4 giờ kể từ hiện tại (cộng thêm độ trễ nhỏ)
         save.sessionEnd = Math.min(inc.sessionEnd, now + SESSION_SECONDS * 1000 + 60000);
       }
+      payRefInstantIfDue(save);
       payRefTiersIfDue(save);
       payRefActiveMilestonesIfDue(save);
       save.friendsCount = friendsCountOf(save.playerId);
@@ -1169,28 +1229,12 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { save, refInfo: refInfoOf(save), referredByCode: referredByCodeOf(save) });
     }
 
-    /* ---- POST /api/exchange {playerId, goldAmount} : vàng -> KC, 125:1, một chiều ---- */
-    if (req.method === 'POST' && url.pathname === '/api/exchange') {
-      const body = await readBody(req);
-      if (body.playerId && !requestAuthorizedFor(req, String(body.playerId))) {
-        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
-      }
-      const save = body.playerId ? getOrCreatePlayer(String(body.playerId), now) : null;
-      if (!save) return sendJson(res, 400, { error: 'Thiếu playerId' });
-      const goldAmount = Math.floor(body.goldAmount);
-      if (!Number.isFinite(goldAmount) || goldAmount < EXCHANGE_RATE) {
-        return sendJson(res, 400, { error: 'Cần ít nhất ' + EXCHANGE_RATE + ' vàng để đổi 1 kim cương' });
-      }
-      const gems = Math.floor(goldAmount / EXCHANGE_RATE);
-      const cost = gems * EXCHANGE_RATE;
-      if (save.gold < cost) return sendJson(res, 400, { error: 'Không đủ vàng để đổi' });
-      save.gold -= cost;
-      save.gems += gems;
-      save._clientGold = save.gold; save._clientGems = save.gems; // client nhận số dư này trong đáp
-      save._lastSync = now; save.lastSeen = now;
-      await persist();
-      return sendJson(res, 200, { save, exchanged: { gold: cost, gems } });
-    }
+    /* ---- /api/exchange ĐÃ GỠ (vá kinh tế 2026-11-28) ----
+     * Endpoint đổi vàng -> KC phía server từng tồn tại nhưng client chính
+     * thức KHÔNG dùng (đổi trong UI đi qua /api/save và bị ngân sách KC
+     * ghìm). Để nó sống tạo vòng lặp in vàng: đổi 125 vàng -> 1 KC phía
+     * server (không trần) rồi mua Rương vàng ở Chợ mở ra tới 1.000 vàng/KC.
+     * Gỡ hẳn endpoint; lời gọi tới đây rơi xuống 404 như route lạ. */
 
     /* ---- POST /api/redeem {playerId, code} ---- */
     if (req.method === 'POST' && url.pathname === '/api/redeem') {
@@ -1496,7 +1540,10 @@ const server = http.createServer(async (req, res) => {
      * Cơ chế giới thiệu THẬT do server kiểm tra (chống farm), làm lại 2026-11-24:
      * - Ghi nhận: mã phải tồn tại; không tự giới thiệu mình; mỗi người chỉ có 1 người
      *   giới thiệu; chỉ ghi nhận khi tài khoản còn "mới" (tổng đào tích lũy < 100.000).
-     * - Ngay khi ghi nhận: người được mời +25.000 vàng/+500 KC, người mời +2.000/+50 KC.
+     * - Ngay khi ghi nhận: người được mời +25.000 vàng/+500 KC. Người mời
+     *   +2.000/+50 KC — TỪ 2026-11-28 trả MUỘN khi bạn mới tự đào đủ
+     *   REF_INSTANT_EARNED (10.000) qua payRefInstantIfDue, chống farm
+     *   nick phụ ghi nhận ref hàng loạt chỉ để hốt KC của người mời.
      * - Người mời nhận thêm 3 tier leo thang theo tổng đào của người được mời
      *   (100.000 / 500.000 / 2.000.000 — xem payRefTiersIfDue) và các mốc SỐ BẠN
      *   CHĂM do server tự trả (xem payRefActiveMilestonesIfDue). */
@@ -1505,6 +1552,9 @@ const server = http.createServer(async (req, res) => {
       if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
       if (!requestAuthorizedFor(req, String(body.playerId))) {
         return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('referral:' + String(body.playerId), 10, 60000) || rateLimited('referral-ip:' + clientIp(req), 30, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít phút' });
       }
       const me = getOrCreatePlayer(String(body.playerId), now);
       const code = String(body.code || '').trim().toUpperCase();
@@ -1521,8 +1571,8 @@ const server = http.createServer(async (req, res) => {
       me.refTiersPaid = 0;
       me.gold += REFERRAL_REWARD.gold;
       me.gems += REFERRAL_REWARD.gems;
-      inviter.gold += REFERRAL_INVITER_REWARD.gold;
-      inviter.gems += REFERRAL_INVITER_REWARD.gems;
+      me.refInstantPaid = false; // người mời nhận +2.000/+50 khi bạn này đào đủ REF_INSTANT_EARNED (payRefInstantIfDue)
+      payRefInstantIfDue(me); // bạn mới nào đã đào sẵn >= 10.000 trước khi ghi nhận thì trả ngay
       inviter.friendsCount = friendsCountOf(inviter.playerId);
       // KHÔNG đụng _clientGold/_clientGems của người mời: client của họ chưa biết
       // khoản cộng này, cơ chế gộp delta ở POST /api/save sẽ giữ nó cho họ.
@@ -1778,7 +1828,7 @@ const server = http.createServer(async (req, res) => {
         effect.boostMins = 30;
       } else if (itemId === 'gold_chest') {
         const gps = gpsOf(me) + extraGpsOf(extrasOf(me.tasks));
-        const reward = Math.min(AD_CHEST_CAP, Math.max(AD_CHEST_MIN, Math.round(gps * AD_CHEST_SECONDS)));
+        const reward = Math.min(MARKET_CHEST_CAP, Math.max(AD_CHEST_MIN, Math.round(gps * AD_CHEST_SECONDS)));
         me.gold += reward;
         me._clientGold = me.gold;
         effect.gold = reward;
