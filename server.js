@@ -190,6 +190,39 @@ function invOf(p) {
   if (!p.inv || typeof p.inv !== 'object') p.inv = {};
   return p.inv;
 }
+/* ---- Quỹ Đầu Tư Thợ Mỏ (Kien chốt 2026-11-28, bản an toàn) ----
+ * Người chơi GỬI VÀNG vào quỹ, khóa đủ kỳ hạn thì nhận lại NGUYÊN GỐC +
+ * lãi trả bằng KC (+ 1 vé quay ở gói cao nhất). Cố ý KHÔNG trả lãi bằng
+ * vàng và KHÔNG bán gói x2 tốc độ: lãi KC không rút thành tiền mặt được
+ * nên không đẻ thêm nợ rút tiền; vàng gửi bị khóa khỏi lưu thông trong
+ * kỳ hạn = sink chống lạm phát mềm. Điều khoản (số vàng/kỳ hạn/lãi) được
+ * CHỤP LẠI vào từng khoản gửi lúc gửi — sửa bảng giá sau này không ảnh
+ * hưởng khoản đang chạy. Trạng thái lưu phía server (p.fund), client
+ * không khai được; không rút trước hạn. */
+const FUND_TIERS = {
+  dong: { amount: 200000, days: 3, kc: 200 },
+  bac: { amount: 1000000, days: 7, kc: 1200 },
+  vang: { amount: 5000000, days: 7, kc: 6000, item: 'spin_ticket' },
+};
+const FUND_MAX_ACTIVE = 3; // tối đa khoản gửi đang chạy cùng lúc mỗi người
+function fundStateOf(p) {
+  if (!p.fund || typeof p.fund !== 'object') p.fund = { deposits: [] };
+  if (!Array.isArray(p.fund.deposits)) p.fund.deposits = [];
+  p.fund.deposits = p.fund.deposits.filter((d) => d && Number.isFinite(d.amount) && Number.isFinite(d.matureAt));
+  return p.fund;
+}
+function fundInfoFor(p, now) {
+  const f = fundStateOf(p);
+  return {
+    tiers: FUND_TIERS,
+    maxActive: FUND_MAX_ACTIVE,
+    serverNow: now,
+    deposits: f.deposits.map((d) => ({
+      id: d.id, tierId: d.tierId, amount: d.amount, kc: d.kc, item: d.item || null,
+      startAt: d.startAt, matureAt: d.matureAt, matured: now >= d.matureAt,
+    })),
+  };
+}
 /* Khung ảnh đại diện: mở khóa theo CẤP NGƯỜI CHƠI (playerLevelOf) hoặc
  * mua đứt bằng KC ở Chợ. Danh sách ĐÃ MUA lưu ở p.framesOwned; khung mở
  * bằng cấp tính động nên không cần lưu. Khung đang đeo (frameId) là thẩm
@@ -767,6 +800,7 @@ function newSave(playerId, now) {
     island: { no: 1, buildings: [0, 0, 0, 0, 0], log: [], week: { key: '', score: 0, at: 0 } }, // Đảo Vàng: số đảo + cấp 5 công trình + nhật ký + điểm đua tuần — server là nguồn sự thật
     wheel: { date: '', spins: 0, adUsed: 0 }, // Vòng quay: ngày VN, lượt quay đang có, lượt ads đã dùng hôm nay — server là nguồn sự thật
     inv: {},                  // Túi đồ chợ vật phẩm: { itemId: số lượng } — server là nguồn sự thật, client không khai được
+    fund: { deposits: [] },   // Quỹ Đầu Tư: các khoản gửi vàng đang khóa [{id, tierId, amount, kc, item, startAt, matureAt}] — server là nguồn sự thật
     framesOwned: [],          // Khung đại diện ĐÃ MUA bằng KC (khung mở bằng cấp tính động, không lưu ở đây)
     _burst: 15000,            // ngân sách chống gian lận còn lại (xem POST /api/save)
     _burstGems: 2000,         // ngân sách KC theo thời gian (vá 2026-11-24)
@@ -1879,6 +1913,90 @@ const server = http.createServer(async (req, res) => {
       me._lastSync = now; me.lastSeen = now;
       await persist();
       return sendJson(res, 200, { save: me, inv, itemId, effect });
+    }
+
+    /* ---- GET /api/fund/info?playerId= ----
+     * Quỹ Đầu Tư: bảng gói (server giữ) + các khoản gửi của chính người chơi. */
+    if (req.method === 'GET' && url.pathname === '/api/fund/info') {
+      const pid = url.searchParams.get('playerId') || '';
+      if (pid && !requestAuthorizedFor(req, pid)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('fund:' + clientIp(req), 60, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const me = pid ? data.players[pid] : null;
+      return sendJson(res, 200, { fund: me ? fundInfoFor(me, now) : { tiers: FUND_TIERS, maxActive: FUND_MAX_ACTIVE, serverNow: now, deposits: [] } });
+    }
+
+    /* ---- POST /api/fund/deposit {playerId, tierId} ----
+     * Gửi vàng vào quỹ: server trừ vàng theo gói server giữ, khóa tới
+     * matureAt. persistNow vì đây là giao dịch tiền một chiều quan trọng. */
+    if (req.method === 'POST' && url.pathname === '/api/fund/deposit') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('fund:' + playerId, 15, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const tierId = String(body.tierId || '');
+      const tier = FUND_TIERS[tierId];
+      if (!tier) return sendJson(res, 400, { error: 'Gói đầu tư không tồn tại' });
+      const me = getOrCreatePlayer(playerId, now);
+      const f = fundStateOf(me);
+      if (f.deposits.length >= FUND_MAX_ACTIVE) {
+        return sendJson(res, 400, { error: `Bạn đang có ${FUND_MAX_ACTIVE} khoản gửi chạy cùng lúc rồi — chờ một khoản đáo hạn đã nhé` });
+      }
+      if ((me.gold || 0) < tier.amount) {
+        return sendJson(res, 400, { error: `Không đủ vàng — gói này cần ${tier.amount.toLocaleString('vi-VN')} vàng, bạn đang có ${Math.floor(me.gold || 0).toLocaleString('vi-VN')} vàng` });
+      }
+      me.gold -= tier.amount;
+      const dep = {
+        id: 'fd_' + now.toString(36) + Math.random().toString(36).slice(2, 8),
+        tierId, amount: tier.amount, kc: tier.kc, item: tier.item || null,
+        startAt: now, matureAt: now + tier.days * 86400e3,
+      };
+      f.deposits.push(dep);
+      me._clientGold = me.gold;
+      me._lastSync = now; me.lastSeen = now;
+      await persistNow();
+      return sendJson(res, 200, { save: me, fund: fundInfoFor(me, now), deposit: dep });
+    }
+
+    /* ---- POST /api/fund/claim {playerId, depositId} ----
+     * Đáo hạn: trả NGUYÊN GỐC vàng + lãi KC (+ vật phẩm nếu gói có) — server
+     * kiểm matureAt bằng giờ server, nhận xong xóa khoản (không nhận 2 lần). */
+    if (req.method === 'POST' && url.pathname === '/api/fund/claim') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('fund:' + playerId, 15, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const me = getOrCreatePlayer(playerId, now);
+      const f = fundStateOf(me);
+      const idx = f.deposits.findIndex((d) => d.id === String(body.depositId || ''));
+      if (idx < 0) return sendJson(res, 400, { error: 'Không tìm thấy khoản gửi này' });
+      const dep = f.deposits[idx];
+      if (now < dep.matureAt) {
+        const leftH = Math.ceil((dep.matureAt - now) / 3600e3);
+        return sendJson(res, 400, { error: `Khoản gửi chưa đáo hạn — còn khoảng ${leftH} giờ nữa` });
+      }
+      f.deposits.splice(idx, 1);
+      me.gold = (me.gold || 0) + dep.amount;
+      me.gems = (me.gems || 0) + (dep.kc || 0);
+      if (dep.item) { const inv = invOf(me); inv[dep.item] = (inv[dep.item] || 0) + 1; }
+      me._clientGold = me.gold;
+      me._clientGems = me.gems;
+      me._lastSync = now; me.lastSeen = now;
+      await persistNow();
+      return sendJson(res, 200, { save: me, fund: fundInfoFor(me, now), claimed: { gold: dep.amount, kc: dep.kc || 0, item: dep.item || null }, inv: invOf(me) });
     }
 
     /* ---- POST /api/level-claim {playerId, level} ----
