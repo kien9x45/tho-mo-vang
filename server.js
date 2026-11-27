@@ -12,6 +12,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 
 const PORT = process.env.PORT || 3000;
 const OWNER_KEY = process.env.OWNER_KEY || ''; // rỗng = khoá luôn endpoint chủ game (không còn mã mặc định trong code)
@@ -2306,8 +2307,30 @@ const server = http.createServer(async (req, res) => {
         if (req.headers['if-none-match'] === etag) { res.writeHead(304); return res.end(); }
         fs.readFile(filePath, (err2, buf) => {
           if (err2) { res.writeHead(404); return res.end('Not found'); }
-          res.writeHead(200, { 'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream', 'Cache-Control': 'no-cache', 'ETag': etag });
-          res.end(buf);
+          const ext = path.extname(filePath).toLowerCase();
+          const type = MIME[ext] || 'application/octet-stream';
+          // Tiết kiệm băng thông (vá 2026-11-27 sau sự cố hết 5GB free của
+          // Render): asset có HASH trong tên file (ảnh webp, font) không bao
+          // giờ đổi nội dung ở cùng một tên -> cache 1 năm immutable, trình
+          // duyệt/webview không tải lại nữa. File không hash (index.html,
+          // main.js, main.css) giữ no-cache + ETag để deploy mới có hiệu lực
+          // ngay. File text được gzip (main.js ~1MB -> ~280KB).
+          const hashedAsset = /-[a-z0-9]{6,}$/i.test(baseName.slice(0, baseName.length - ext.length))
+            && ['.webp', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2'].includes(ext);
+          const headers = {
+            'Content-Type': type,
+            'Cache-Control': hashedAsset ? 'public, max-age=31536000, immutable' : 'no-cache',
+            'ETag': etag,
+          };
+          let body = buf;
+          const compressible = type.startsWith('text/') || type === 'application/javascript' || type === 'application/json' || type === 'image/svg+xml';
+          if (compressible && buf.length > 1024 && /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''))) {
+            body = zlib.gzipSync(buf, { level: 6 });
+            headers['Content-Encoding'] = 'gzip';
+            headers['Vary'] = 'Accept-Encoding';
+          }
+          res.writeHead(200, headers);
+          res.end(body);
         });
       });
       return;
