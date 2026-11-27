@@ -43,6 +43,9 @@ const AD_CHEST_SECONDS = 300;
 const AD_CHEST_MIN = 5000;
 const AD_CHEST_CAP = 250000;
 const AD_CHEST_COOLDOWN_MS = 60000;
+const AD_CHEST_DAILY_MAX = 15;  // trần rương vàng/ngày VN (vá 2026-11-27 — trước đây KHÔNG có trần ngày, chỉ cooldown 60s nên farm được)
+const AD_GEMS_REWARD = 120;     // KC miễn phí mỗi lượt xem ads — server cấp từ 2026-11-27 (trước đây client tự cộng qua save)
+const AD_GEMS_DAILY_MAX = 10;   // trần lượt nhận KC ads/ngày VN
 /* ---- Cấp độ NGƯỜI CHƠI (khác cấp thợ mua bằng KC): theo TỔNG VÀNG ĐÀO tích
  * lũy (totalEarned — server đã kẹp chống gian lận), cấp 1..100 (nâng từ 50
  * lên 100 ngày 2026-11-27, giữ nguyên công thức). Ngưỡng đạt
@@ -70,6 +73,16 @@ const RAID_STEAL_PCT = 0.05;           // cướp tối đa 5% số dư đối t
 const RAID_STEAL_CAP = 2000000;        // trần vàng cướp được trong 1 lượt
 const RAID_PAIR_COOLDOWN_MS = 24 * 3600e3; // không tấn công lại cùng 1 người trong 24h; cũng là hạn phản công
 function vnDateOf(now) { return new Date(now + 7 * 3600e3).toISOString().slice(0, 10); }
+/* Bộ đếm ads theo NGÀY VN (rương vàng + KC miễn phí): tự reset khi sang
+ * ngày mới; người chơi cũ chưa có field thì khởi tạo tại chỗ. */
+function adDailyOf(p, now) {
+  const today = vnDateOf(now);
+  if (p.adChestDay !== today) { p.adChestDay = today; p.adChestCount = 0; }
+  if (p.adGemsDay !== today) { p.adGemsDay = today; p.adGemsCount = 0; }
+  if (!Number.isFinite(p.adChestCount)) p.adChestCount = 0;
+  if (!Number.isFinite(p.adGemsCount)) p.adGemsCount = 0;
+  return p;
+}
 function raidStateOf(p, now) {
   if (!p.raid || typeof p.raid !== 'object') p.raid = { date: '', used: 0, shieldUntil: 0, pending: null, log: [] };
   if (!Array.isArray(p.raid.log)) p.raid.log = [];
@@ -653,6 +666,9 @@ function newSave(playerId, now) {
     levelClaims: [],          // các mốc cấp người chơi đã nhận thưởng (vd [10, 20]) — server là nguồn sự thật
     raid: { date: '', used: 0, shieldUntil: 0, pending: null, log: [] }, // PvP đột kích: lượt/ngày, khiên, đối thủ đang nhắm, nhật ký — server là nguồn sự thật
     lastAdChestAt: 0,         // mốc mở rương vàng ads gần nhất (ms) — cooldown phía server, client không khai được
+    adChestDay: '', adChestCount: 0, // rương vàng ads: ngày VN + số rương đã mở hôm nay (trần AD_CHEST_DAILY_MAX) — server là nguồn sự thật
+    adGemsDay: '', adGemsCount: 0,   // KC ads: ngày VN + số lượt đã nhận hôm nay (trần AD_GEMS_DAILY_MAX) — server là nguồn sự thật
+    adjustments: [],                 // lịch sử owner TRỪ vàng/KC (thu hồi phần bất minh) — xem POST /api/players/adjust
     island: { no: 1, buildings: [0, 0, 0, 0, 0], log: [], week: { key: '', score: 0, at: 0 } }, // Đảo Vàng: số đảo + cấp 5 công trình + nhật ký + điểm đua tuần — server là nguồn sự thật
     wheel: { date: '', spins: 0, adUsed: 0 }, // Vòng quay: ngày VN, lượt quay đang có, lượt ads đã dùng hôm nay — server là nguồn sự thật
     inv: {},                  // Túi đồ chợ vật phẩm: { itemId: số lượng } — server là nguồn sự thật, client không khai được
@@ -1309,6 +1325,36 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, playerId: pid, confiscated, resets: fresh.resets });
     }
 
+    /* ---- POST /api/players/adjust (owner) {playerId, gold, gems} ----
+     * TRỪ vàng/KC của 1 tài khoản để thu hồi phần tài sản BẤT MINH mà KHÔNG
+     * reset: giữ nguyên đội thợ/cấp/tổng đào/bạn bè. Số trừ kẹp theo số dư
+     * thật; trừ xong đồng bộ _clientGold/_clientGems và vì gộp save tính
+     * delta theo mốc của chính client đó nên client cũ không hồi lại được
+     * phần đã trừ. Mỗi lần trừ ghi vào adjustments[] để truy vết. Dùng thay
+     * tịch thu khi muốn giữ người chơi (Kien chốt 2026-11-27). */
+    if (req.method === 'POST' && url.pathname === '/api/players/adjust') {
+      if (rateLimited('owner:' + clientIp(req), 60, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít phút' });
+      }
+      if (!isOwner(req)) return sendJson(res, 401, { error: 'Sai mã chủ game (header x-owner-key)' });
+      const body = await readBody(req);
+      const pid = String(body.playerId || '');
+      const p = data.players[pid];
+      if (!p) return sendJson(res, 404, { error: 'Không tìm thấy người chơi này' });
+      const dGold = Math.min(Math.max(0, Math.floor(Number(body.gold) || 0)), p.gold || 0);
+      const dGems = Math.min(Math.max(0, Math.floor(Number(body.gems) || 0)), p.gems || 0);
+      if (dGold <= 0 && dGems <= 0) return sendJson(res, 400, { error: 'Hãy nhập số vàng hoặc KC cần trừ (lớn hơn 0)' });
+      p.gold -= dGold;
+      p.gems -= dGems;
+      p._clientGold = p.gold; p._clientGems = p.gems;
+      if (!Array.isArray(p.adjustments)) p.adjustments = [];
+      p.adjustments.push({ at: now, gold: dGold, gems: dGems });
+      p.adjustments = p.adjustments.slice(-20);
+      p.lastSeen = now;
+      await persist();
+      return sendJson(res, 200, { ok: true, playerId: pid, deducted: { gold: dGold, gems: dGems }, gold: p.gold, gems: p.gems });
+    }
+
     /* ---- POST /api/referral {playerId, code} ----
      * Cơ chế giới thiệu THẬT do server kiểm tra (chống farm), làm lại 2026-11-24:
      * - Ghi nhận: mã phải tồn tại; không tự giới thiệu mình; mỗi người chỉ có 1 người
@@ -1413,7 +1459,9 @@ const server = http.createServer(async (req, res) => {
      * (gpsOf + extraGpsOf — client không khai khống được): gps x 300 giây
      * (5 phút thu nhập), sàn 5.000, trần 250.000. Cooldown 60 giây/lần bằng
      * lastAdChestAt phía server nên gọi thẳng endpoint cũng không farm
-     * được; khoản cộng đi qua _clientGold để gộp delta không ghi đè mất. */
+     * được; TỪ 2026-11-27 thêm TRẦN 15 rương/ngày VN (adChestCount) vì chỉ
+     * cooldown thôi chưa đủ — farm cả đêm được hàng chục triệu. Khoản cộng
+     * đi qua _clientGold để gộp delta không ghi đè mất. */
     if (req.method === 'POST' && url.pathname === '/api/ad-chest') {
       const body = await readBody(req);
       if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
@@ -1430,14 +1478,47 @@ const server = http.createServer(async (req, res) => {
         const waitSec = Math.ceil(waitMs / 1000);
         return sendJson(res, 429, { error: `Rương vàng vừa mở rồi — đợi ${waitSec} giây nữa nhé`, retryAfterSec: waitSec });
       }
+      adDailyOf(me, now);
+      if (me.adChestCount >= AD_CHEST_DAILY_MAX) {
+        return sendJson(res, 429, { error: `Hôm nay bạn đã mở đủ ${AD_CHEST_DAILY_MAX} rương vàng rồi — mai quay lại nhé`, chestLeft: 0 });
+      }
       const gps = gpsOf(me) + extraGpsOf(extrasOf(me.tasks));
       const reward = Math.min(AD_CHEST_CAP, Math.max(AD_CHEST_MIN, Math.round(gps * AD_CHEST_SECONDS)));
       me.gold += reward;
       me.lastAdChestAt = now;
+      me.adChestCount++;
       me._clientGold = me.gold; // client nhận số dư mới trong đáp, gộp delta giữ khoản cộng này
       me._lastSync = now; me.lastSeen = now;
       await persist();
-      return sendJson(res, 200, { save: me, reward: { gold: reward }, gps });
+      return sendJson(res, 200, { save: me, reward: { gold: reward }, gps, chestLeft: AD_CHEST_DAILY_MAX - me.adChestCount });
+    }
+
+    /* ---- POST /api/ad-gems {playerId} ----
+     * KC miễn phí xem ads: TỪ 2026-11-27 do SERVER cấp (trước đây client tự
+     * cộng +120 rồi gộp qua save — không kiểm chứng được, bơm KC bằng save
+     * giả cũng qua). Client chỉ gọi sau khi AdsGram xác nhận xem hết ads;
+     * trần AD_GEMS_DAILY_MAX lượt/ngày VN đếm phía server (adGemsCount). */
+    if (req.method === 'POST' && url.pathname === '/api/ad-gems') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('adgems:' + playerId, 10, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const me = getOrCreatePlayer(playerId, now);
+      adDailyOf(me, now);
+      if (me.adGemsCount >= AD_GEMS_DAILY_MAX) {
+        return sendJson(res, 429, { error: `Hôm nay bạn đã nhận đủ ${AD_GEMS_DAILY_MAX} lượt KC miễn phí rồi — mai quay lại nhé`, gemsLeft: 0 });
+      }
+      me.gems += AD_GEMS_REWARD;
+      me.adGemsCount++;
+      me._clientGems = me.gems; // client nhận số dư mới trong đáp, gộp delta giữ khoản cộng này
+      me._lastSync = now; me.lastSeen = now;
+      await persist();
+      return sendJson(res, 200, { save: me, reward: { gems: AD_GEMS_REWARD }, gemsLeft: AD_GEMS_DAILY_MAX - me.adGemsCount });
     }
 
     /* ---- GET /api/market/info?playerId= ----
