@@ -1206,6 +1206,7 @@ const server = http.createServer(async (req, res) => {
       const code = String(body.code || '').trim().toUpperCase();
       const gift = data.giftCodes[code];
       if (!gift) return sendJson(res, 404, { error: 'Mã quà tặng không tồn tại' });
+      if (gift.revoked) return sendJson(res, 400, { error: 'Mã quà này đã bị thu hồi' });
       const used = data.redemptions[save.playerId] || [];
       if (used.includes(code)) return sendJson(res, 400, { error: 'Bạn đã dùng mã này rồi (mỗi mã chỉ dùng 1 lần)' });
       // Giới hạn tổng số lượt nhập (maxUses = null -> không giới hạn; mã cũ không
@@ -1259,10 +1260,32 @@ const server = http.createServer(async (req, res) => {
             createdAt: g.createdAt || 0,
             maxUses: g.maxUses == null ? null : g.maxUses,
             usedCount: giftUsedCountOf(code),
+            revoked: !!g.revoked,
+            revokedAt: g.revokedAt || 0,
           };
         }
         return sendJson(res, 200, { giftCodes });
       }
+    }
+
+    /* ---- POST /api/giftcodes/revoke (owner): thu hồi 1 mã quà ----
+       Mã bị thu hồi không nhập được nữa (redeem trả lỗi riêng); người đã nhập
+       trước đó giữ nguyên thưởng. Tạo lại mã trùng tên sẽ ghi đè = mở lại. */
+    if (req.method === 'POST' && url.pathname === '/api/giftcodes/revoke') {
+      if (rateLimited('owner:' + clientIp(req), 60, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít phút' });
+      }
+      if (!isOwner(req)) return sendJson(res, 401, { error: 'Sai mã chủ game (header x-owner-key)' });
+      const body = await readBody(req);
+      const code = String(body.code || '').trim().toUpperCase();
+      if (!code) return sendJson(res, 400, { error: 'Thiếu mã code' });
+      const gift = data.giftCodes[code];
+      if (!gift) return sendJson(res, 404, { error: 'Mã quà tặng không tồn tại' });
+      if (gift.revoked) return sendJson(res, 400, { error: 'Mã này đã bị thu hồi rồi' });
+      gift.revoked = true;
+      gift.revokedAt = now;
+      await persistNow();
+      return sendJson(res, 200, { ok: true, code, revoked: true });
     }
 
     /* ---- POST /api/withdraw ---- */
