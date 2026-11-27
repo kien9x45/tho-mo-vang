@@ -44,11 +44,12 @@ const AD_CHEST_MIN = 5000;
 const AD_CHEST_CAP = 250000;
 const AD_CHEST_COOLDOWN_MS = 60000;
 /* ---- Cấp độ NGƯỜI CHƠI (khác cấp thợ mua bằng KC): theo TỔNG VÀNG ĐÀO tích
- * lũy (totalEarned — server đã kẹp chống gian lận), cấp 1..50. Ngưỡng đạt
+ * lũy (totalEarned — server đã kẹp chống gian lận), cấp 1..100 (nâng từ 50
+ * lên 100 ngày 2026-11-27, giữ nguyên công thức). Ngưỡng đạt
  * cấp n (n>=2) = làm tròn nghìn của 2500 x (n-1)^2.6: cấp 10 ~777.000,
- * cấp 20 ~5,3tr, cấp 30 ~15,7tr, cấp 40 ~34tr, cấp 50 ~62tr tổng đào.
+ * cấp 20 ~5,3tr, cấp 30 ~15,7tr, cấp 40 ~34tr, cấp 50 ~62tr, cấp 100 ~386tr.
  * CÔNG THỨC NÀY PHẢI GIỐNG HỆT phía client (api.ts: levelThreshold). ---- */
-const PLAYER_LEVEL_MAX = 50;
+const PLAYER_LEVEL_MAX = 100;
 function levelThreshold(n) {
   return Math.round(2500 * Math.pow(n - 1, 2.6) / 1000) * 1000;
 }
@@ -161,6 +162,9 @@ const FRAMES = {
   ngoc: { price: 1500, level: 30 },     // Ngọc Lục Bảo
   neon: { price: 2500, level: 40 },     // Neon Cyber
   cauvong: { price: 4000, level: 50 },  // Cầu Vồng Huyền Thoại
+  hackim: { price: 7000, level: 60 },   // Hắc Kim Vương Giả (2026-11-27)
+  hoadiem: { price: 12000, level: 80 }, // Hỏa Diệm Thần (2026-11-27)
+  thienha: { price: 20000, level: 100 },// Thiên Hà Vô Cực (2026-11-27)
 };
 function framesOwnedOf(p) {
   const owned = new Set(Array.isArray(p.framesOwned) ? p.framesOwned : []);
@@ -306,6 +310,11 @@ const LEVEL_MILESTONE_REWARDS = {
   30: { gold: 200000, gems: 1000 },
   40: { gold: 500000, gems: 1500 },
   50: { gold: 1500000, gems: 3000 },
+  60: { gold: 3000000, gems: 4500 },
+  70: { gold: 5000000, gems: 6000 },
+  80: { gold: 8000000, gems: 8000 },
+  90: { gold: 12000000, gems: 10000 },
+  100: { gold: 25000000, gems: 15000 },
 };
 const REFERRAL_MILESTONE_EARNED = 100000; // cửa sổ "tài khoản còn mới" + mốc tính BẠN CHĂM (tier 1)
 // 3 mốc thưởng cho người mời theo tổng đào tích lũy của TỪNG người được mời
@@ -1564,7 +1573,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     /* ---- POST /api/level-claim {playerId, level} ----
-     * Nhận thưởng MỐC CẤP người chơi (10/20/30/40/50): server tự tính cấp
+     * Nhận thưởng MỐC CẤP người chơi (10/20/.../100): server tự tính cấp
      * thật từ totalEarned của chính mình (không tin client khai), mốc phải
      * có thưởng, cấp phải đạt, và mỗi mốc chỉ nhận 1 lần (levelClaims). */
     if (req.method === 'POST' && url.pathname === '/api/level-claim') {
