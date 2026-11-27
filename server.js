@@ -1348,11 +1348,56 @@ const server = http.createServer(async (req, res) => {
       p.gems -= dGems;
       p._clientGold = p.gold; p._clientGems = p.gems;
       if (!Array.isArray(p.adjustments)) p.adjustments = [];
-      p.adjustments.push({ at: now, gold: dGold, gems: dGems });
+      p.adjustments.push({ at: now, gold: dGold, gems: dGems, kind: 'deduct' });
       p.adjustments = p.adjustments.slice(-20);
       p.lastSeen = now;
       await persist();
       return sendJson(res, 200, { ok: true, playerId: pid, deducted: { gold: dGold, gems: dGems }, gold: p.gold, gems: p.gems });
+    }
+
+    /* ---- POST /api/players/credit (owner) {playerId, gold, gems} ----
+     * CỘNG vàng/KC cho 1 tài khoản — chiều ngược của /adjust, dùng để HOÀN
+     * LẠI khi trừ nhầm tay (ca Quân Nguyễn 2026-11-27: định trừ 18,4tr mà
+     * trừ sạch 40,8tr) hoặc cộng thưởng thủ công. Cộng xong đồng bộ
+     * _clientGold/_clientGems như adjust; ghi adjustments[] kind:'credit'. */
+    if (req.method === 'POST' && url.pathname === '/api/players/credit') {
+      if (rateLimited('owner:' + clientIp(req), 60, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít phút' });
+      }
+      if (!isOwner(req)) return sendJson(res, 401, { error: 'Sai mã chủ game (header x-owner-key)' });
+      const body = await readBody(req);
+      const pid = String(body.playerId || '');
+      const p = data.players[pid];
+      if (!p) return sendJson(res, 404, { error: 'Không tìm thấy người chơi này' });
+      const cGold = Math.min(Math.max(0, Math.floor(Number(body.gold) || 0)), 1000000000);
+      const cGems = Math.min(Math.max(0, Math.floor(Number(body.gems) || 0)), 1000000000);
+      if (cGold <= 0 && cGems <= 0) return sendJson(res, 400, { error: 'Hãy nhập số vàng hoặc KC cần cộng (lớn hơn 0)' });
+      p.gold = (p.gold || 0) + cGold;
+      p.gems = (p.gems || 0) + cGems;
+      p._clientGold = p.gold; p._clientGems = p.gems;
+      if (!Array.isArray(p.adjustments)) p.adjustments = [];
+      p.adjustments.push({ at: now, gold: cGold, gems: cGems, kind: 'credit' });
+      p.adjustments = p.adjustments.slice(-20);
+      p.lastSeen = now;
+      await persist();
+      return sendJson(res, 200, { ok: true, playerId: pid, credited: { gold: cGold, gems: cGems }, gold: p.gold, gems: p.gems });
+    }
+
+    /* ---- GET /api/players/adjustments?playerId= (owner) ----
+     * Tra cứu số dư hiện tại + lịch sử trừ/cộng của 1 tài khoản để owner
+     * biết CHÍNH XÁC lần trừ gần nhất là bao nhiêu trước khi hoàn lại. */
+    if (req.method === 'GET' && url.pathname === '/api/players/adjustments') {
+      if (rateLimited('owner:' + clientIp(req), 60, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít phút' });
+      }
+      if (!isOwner(req)) return sendJson(res, 401, { error: 'Sai mã chủ game (header x-owner-key)' });
+      const pid = String(url.searchParams.get('playerId') || '');
+      const p = data.players[pid];
+      if (!p) return sendJson(res, 404, { error: 'Không tìm thấy người chơi này' });
+      const list = (Array.isArray(p.adjustments) ? p.adjustments : []).map((a) => ({
+        at: a.at || 0, gold: a.gold || 0, gems: a.gems || 0, kind: a.kind || 'deduct',
+      }));
+      return sendJson(res, 200, { ok: true, playerId: pid, gold: p.gold || 0, gems: p.gems || 0, adjustments: list });
     }
 
     /* ---- POST /api/referral {playerId, code} ----
