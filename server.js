@@ -167,13 +167,25 @@ const WHEEL_SPIN_CAP = 20;         // trần lượt quay tích lũy được
  * rương vàng), riêng x2 thu nhập trả số phút về cho client áp vào
  * boostUntil (vốn là cơ chế phía client như boost xem ads). */
 const MARKET_ITEMS = {
-  shield4: { price: 150 },     // khiên bảo vệ mỏ 4 giờ
-  shield24: { price: 600 },    // khiên bảo vệ mỏ 24 giờ
-  raid_ticket: { price: 100 }, // +1 lượt đột kích trong ngày
-  spin_ticket: { price: 120 }, // +1 lượt quay Đảo Vàng
-  boost30: { price: 200 },     // x2 thu nhập 30 phút
-  gold_chest: { price: 250 },  // mở ra vàng = gps x 300 giây (sàn 5.000, trần 250.000 — như rương ads)
+  shield4: { price: 150, goldSecs: 600 },     // khiên bảo vệ mỏ 4 giờ
+  shield24: { price: 600, goldSecs: 3000 },   // khiên bảo vệ mỏ 24 giờ
+  raid_ticket: { price: 100, goldSecs: 400 }, // +1 lượt đột kích trong ngày
+  spin_ticket: { price: 120, goldSecs: 500 }, // +1 lượt quay Đảo Vàng
+  boost30: { price: 200, goldSecs: 2400 },    // x2 thu nhập 30 phút — giá vàng gps x 2400s > vàng kiếm thêm tối đa gps x 1800s nên mua bằng vàng luôn là LỖ vàng ròng (chống arbitrage)
+  gold_chest: { price: 250 },  // mở ra vàng = gps x 300 giây (sàn 5.000, trần 250.000 — như rương ads); CHỈ bán bằng KC (bán bằng vàng = vòng tròn vô nghĩa)
 };
+/* Chợ Vàng (2026-11-28, Kien chốt): 5 món trên còn mua được bằng VÀNG, giá =
+ * gps thật của người mua x goldSecs giây thu nhập (làm tròn trăm, sàn 500) —
+ * người đào nhanh trả đắt, người mới vẫn mua nổi; vàng bị ĐỐT khỏi lưu thông
+ * (sink chống lạm phát). Server là nguồn sự thật: giá tính lại tại lúc mua. */
+const GOLD_PRICE_MIN = 500;
+function goldPriceOf(item, gps) {
+  if (!item || !item.goldSecs) return 0;
+  return Math.max(GOLD_PRICE_MIN, Math.round((gps * item.goldSecs) / 100) * 100);
+}
+function totalGpsOf(p) {
+  return gpsOf(p) + extraGpsOf(extrasOf(p.tasks));
+}
 function invOf(p) {
   if (!p.inv || typeof p.inv !== 'object') p.inv = {};
   return p.inv;
@@ -1732,7 +1744,12 @@ const server = http.createServer(async (req, res) => {
       const framePrices = {};
       for (const [id, f] of Object.entries(FRAMES)) framePrices[id] = { price: f.price, level: f.level };
       const me = pid ? data.players[pid] : null;
-      return sendJson(res, 200, { prices, inv: me ? invOf(me) : {}, framePrices, framesOwned: me ? framesOwnedOf(me) : [] });
+      const goldPrices = {};
+      if (me) {
+        const gps = totalGpsOf(me);
+        for (const [id, it] of Object.entries(MARKET_ITEMS)) if (it.goldSecs) goldPrices[id] = goldPriceOf(it, gps);
+      }
+      return sendJson(res, 200, { prices, goldPrices, inv: me ? invOf(me) : {}, framePrices, framesOwned: me ? framesOwnedOf(me) : [] });
     }
 
     /* ---- POST /api/market/buy {playerId, itemId} ----
@@ -1748,19 +1765,34 @@ const server = http.createServer(async (req, res) => {
       if (rateLimited('market:' + playerId, 30, 60000)) {
         return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
       }
-      const item = MARKET_ITEMS[String(body.itemId || '')];
+      const itemId = String(body.itemId || '');
+      const item = MARKET_ITEMS[itemId];
       if (!item) return sendJson(res, 400, { error: 'Vật phẩm không tồn tại' });
       const me = getOrCreatePlayer(playerId, now);
+      const inv = invOf(me);
+      if (body.currency === 'gold') {
+        // Chợ Vàng: trừ VÀNG theo giá gps của chính người mua, vàng bị đốt.
+        if (!item.goldSecs) return sendJson(res, 400, { error: 'Vật phẩm này chỉ bán bằng kim cương' });
+        const price = goldPriceOf(item, totalGpsOf(me));
+        if ((me.gold || 0) < price) {
+          return sendJson(res, 400, { error: `Không đủ vàng — vật phẩm này giá ${price.toLocaleString('vi-VN')} vàng theo tốc độ đào của bạn, bạn đang có ${Math.floor(me.gold || 0).toLocaleString('vi-VN')} vàng` });
+        }
+        me.gold -= price;
+        inv[itemId] = (inv[itemId] || 0) + 1;
+        me._clientGold = me.gold;
+        me._lastSync = now; me.lastSeen = now;
+        await persistNow();
+        return sendJson(res, 200, { save: me, inv, itemId });
+      }
       if ((me.gems || 0) < item.price) {
         return sendJson(res, 400, { error: `Không đủ kim cương — vật phẩm này giá ${item.price} KC, bạn đang có ${Math.floor(me.gems || 0)} KC` });
       }
       me.gems -= item.price;
-      const inv = invOf(me);
-      inv[String(body.itemId)] = (inv[String(body.itemId)] || 0) + 1;
+      inv[itemId] = (inv[itemId] || 0) + 1;
       me._clientGems = me.gems;
       me._lastSync = now; me.lastSeen = now;
       await persist();
-      return sendJson(res, 200, { save: me, inv, itemId: String(body.itemId) });
+      return sendJson(res, 200, { save: me, inv, itemId });
     }
 
     /* ---- POST /api/market/buy-frame {playerId, frameId} ----
