@@ -242,6 +242,18 @@ function framesOwnedOf(p) {
   for (const [id, f] of Object.entries(FRAMES)) if (lvl >= f.level) owned.add(id);
   return [...owned];
 }
+// Trưng bày công khai cho bảng xếp hạng: khung + nhân vật người chơi ĐANG
+// ĐEO (lưu ở extras __tmv). Khung chỉ lộ khi người đó thật sự sở hữu (đã
+// mua hoặc đủ cấp mở khóa) — client khai khống frameId cũng không hiện.
+function publicShowcaseOf(p) {
+  const extras = extrasOf(p.tasks);
+  let frame = null;
+  if (extras && typeof extras.frameId === 'string' && FRAMES[extras.frameId] && framesOwnedOf(p).includes(extras.frameId)) {
+    frame = extras.frameId;
+  }
+  const avatar = extras && typeof extras.avatarId === 'string' && /^[a-z0-9-]{1,20}$/.test(extras.avatarId) ? extras.avatarId : null;
+  return { frame, avatar };
+}
 // Thứ tự ô trên vòng quay — client (App.tsx WHEEL_SEGMENTS) PHẢI giữ đúng thứ tự này.
 const WHEEL_SEGMENTS = [
   { key: 'gold_small', weight: 26 },
@@ -2516,6 +2528,7 @@ const server = http.createServer(async (req, res) => {
         name: (typeof p.displayName === 'string' && p.displayName) || ('Thợ mỏ #' + String(p.referralCode || p.playerId || '????').slice(-4).toUpperCase()),
         level: playerLevelOf(p.totalEarned),
         totalEarned: Math.floor(p.totalEarned),
+        ...publicShowcaseOf(p),
         me: !!pid && p.playerId === pid,
       });
       const top = ranked.slice(0, 50).map((p, i) => pub(p, i + 1));
@@ -2564,6 +2577,7 @@ const server = http.createServer(async (req, res) => {
           level: playerLevelOf(p.totalEarned),
           active: c.active,
           total: c.total,
+          ...publicShowcaseOf(p),
           me: !!pid && p.playerId === pid,
         };
       };
