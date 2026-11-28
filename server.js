@@ -47,6 +47,8 @@ const AD_CHEST_COOLDOWN_MS = 60000;
 const AD_CHEST_DAILY_MAX = 15;  // trần rương vàng/ngày VN (vá 2026-11-27 — trước đây KHÔNG có trần ngày, chỉ cooldown 60s nên farm được)
 const AD_GEMS_REWARD = 120;     // KC miễn phí mỗi lượt xem ads — server cấp từ 2026-11-27 (trước đây client tự cộng qua save)
 const AD_GEMS_DAILY_MAX = 10;   // trần lượt nhận KC ads/ngày VN
+const AD_OFFLINE_DAILY_MAX = 3; // trần lượt nhận ×4 thu nhập offline bằng ads/ngày VN (Kien chốt 2026-11-28 — đòn bẩy doanh thu Monetag)
+const OFFLINE_BOOST_WINDOW_MS = 30 * 60 * 1000; // khoản ×4 offline chỉ dùng được trong 30 phút sau lần tải game đã cấp phần 25%
 const MARKET_CHEST_CAP = 25000; // trần Rương vàng ở CHỢ (vá kinh tế 2026-11-28): 25.000/250 KC = tối đa 100 vàng/KC, THẤP hơn giá đổi 150 vàng/KC nên vòng lặp đổi vàng -> KC -> rương luôn LỖ; rương ADS giữ trần riêng 250.000
 const SAVE_GEMS_DAILY_CAP = 2000; // trần KC/ngày cho phần KC client tự khai qua /api/save KHÔNG có vàng chống lưng (vá 2026-11-28; thừa cho điểm danh 10 + chuỗi 300 + nhiệm vụ vài trăm/ngày)
 /* ---- Cấp độ NGƯỜI CHƠI (khác cấp thợ mua bằng KC): theo TỔNG VÀNG ĐÀO tích
@@ -82,8 +84,10 @@ function adDailyOf(p, now) {
   const today = vnDateOf(now);
   if (p.adChestDay !== today) { p.adChestDay = today; p.adChestCount = 0; }
   if (p.adGemsDay !== today) { p.adGemsDay = today; p.adGemsCount = 0; }
+  if (p.adOfflineDay !== today) { p.adOfflineDay = today; p.adOfflineCount = 0; }
   if (!Number.isFinite(p.adChestCount)) p.adChestCount = 0;
   if (!Number.isFinite(p.adGemsCount)) p.adGemsCount = 0;
+  if (!Number.isFinite(p.adOfflineCount)) p.adOfflineCount = 0;
   return p;
 }
 /* Bộ đếm KC client tự khai qua /api/save theo NGÀY VN (vá kinh tế
@@ -1011,6 +1015,11 @@ function applyOffline(save, now) {
   if (earned > 0) {
     save.gold += earned;
     save.totalEarned = (save.totalEarned || 0) + earned;
+    // Khoản chờ NHÂN ×4 bằng ads: phần 75% còn lại (= 3 lần phần 25% vừa
+    // cấp) để POST /api/ad-offline trả sau khi người chơi xem hết ads —
+    // server tự giữ số này, client không khai khống được; ghi đè khoản chờ
+    // cũ mỗi lần có thu nhập offline mới.
+    save.offlineBoost = { extra: earned * 3, at: now };
   }
   save.lastSeen = now;
   return earned;
@@ -1795,6 +1804,49 @@ const server = http.createServer(async (req, res) => {
       me._lastSync = now; me.lastSeen = now;
       await persist();
       return sendJson(res, 200, { save: me, reward: { gems: AD_GEMS_REWARD }, gemsLeft: AD_GEMS_DAILY_MAX - me.adGemsCount });
+    }
+
+    /* ---- POST /api/ad-offline {playerId} ----
+     * Nhận ×4 thu nhập offline bằng ads (Kien chốt 2026-11-28): phần 25%
+     * đã được applyOffline cộng sẵn lúc tải game; endpoint này trả nốt
+     * 75% còn lại (offlineBoost.extra do server tự tính và giữ lúc cấp
+     * phần 25%) để tổng nhận đủ 100%. Chống farm: khoản chờ dùng 1 lần
+     * (xóa ngay khi trả), hết hạn sau OFFLINE_BOOST_WINDOW_MS, trần
+     * AD_OFFLINE_DAILY_MAX lượt/ngày VN; thời gian offline là thời gian
+     * thật nên đăng xuất/đăng nhập liên tục cũng không nhân thêm được. */
+    if (req.method === 'POST' && url.pathname === '/api/ad-offline') {
+      const body = await readBody(req);
+      if (!body.playerId) return sendJson(res, 400, { error: 'Thiếu playerId' });
+      const playerId = String(body.playerId);
+      if (!requestAuthorizedFor(req, playerId)) {
+        return sendJson(res, 401, { error: 'Không xác thực được người chơi Telegram — hãy mở lại game trong Telegram' });
+      }
+      if (rateLimited('adoffline:' + playerId, 10, 60000)) {
+        return sendJson(res, 429, { error: 'Thao tác quá nhanh, thử lại sau ít giây' });
+      }
+      const me = getOrCreatePlayer(playerId, now);
+      const pending = me.offlineBoost;
+      if (!pending || !Number.isFinite(pending.extra) || pending.extra <= 0) {
+        return sendJson(res, 400, { error: 'Chưa có thu nhập offline nào đang chờ nhân ×4 — hãy quay lại sau khi bạn offline một lúc nhé' });
+      }
+      if (now - (Number(pending.at) || 0) > OFFLINE_BOOST_WINDOW_MS) {
+        me.offlineBoost = null;
+        await persist();
+        return sendJson(res, 400, { error: 'Đã quá hạn nhân ×4 cho khoản offline này (30 phút) — phần 25% bạn đã nhận rồi' });
+      }
+      adDailyOf(me, now);
+      if (me.adOfflineCount >= AD_OFFLINE_DAILY_MAX) {
+        return sendJson(res, 429, { error: `Hôm nay bạn đã nhân ×4 thu nhập offline đủ ${AD_OFFLINE_DAILY_MAX} lần rồi — mai quay lại nhé`, boostLeft: 0 });
+      }
+      const extra = Math.floor(pending.extra);
+      me.gold += extra;
+      me.totalEarned = (me.totalEarned || 0) + extra;
+      me.offlineBoost = null;
+      me.adOfflineCount++;
+      me._clientGold = me.gold; // client nhận số dư mới trong đáp, gộp delta giữ khoản cộng này
+      me._lastSync = now; me.lastSeen = now;
+      await persistNow();
+      return sendJson(res, 200, { save: me, reward: { gold: extra }, boostLeft: AD_OFFLINE_DAILY_MAX - me.adOfflineCount });
     }
 
     /* ---- GET /api/market/info?playerId= ----
