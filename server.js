@@ -171,7 +171,7 @@ const MARKET_ITEMS = {
   shield24: { price: 600, goldSecs: 3000 },   // khiên bảo vệ mỏ 24 giờ
   raid_ticket: { price: 100, goldSecs: 400 }, // +1 lượt đột kích trong ngày
   spin_ticket: { price: 120, goldSecs: 500 }, // +1 lượt quay Đảo Vàng
-  boost30: { price: 200, goldSecs: 2400 },    // x2 thu nhập 30 phút — giá vàng gps x 2400s > vàng kiếm thêm tối đa gps x 1800s nên mua bằng vàng luôn là LỖ vàng ròng (chống arbitrage)
+  boost30: { price: 300, goldSecs: 2400 },    // x2 thu nhập 30 phút — giá KC 300 (Kien tăng 200→300, 28/11); giá vàng gps x 2400s > vàng kiếm thêm tối đa gps x 1800s nên mua bằng vàng luôn là LỖ vàng ròng (chống arbitrage)
   gold_chest: { price: 250 },  // mở ra vàng = gps x 300 giây (sàn 5.000, trần 250.000 — như rương ads); CHỈ bán bằng KC (bán bằng vàng = vòng tròn vô nghĩa)
 };
 /* Chợ Vàng (2026-11-28, Kien chốt): 5 món trên còn mua được bằng VÀNG, giá =
