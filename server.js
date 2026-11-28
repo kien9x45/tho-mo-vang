@@ -2493,6 +2493,7 @@ const server = http.createServer(async (req, res) => {
           name: (typeof p.displayName === 'string' && p.displayName) || ('Thợ mỏ #' + String(p.referralCode || p.playerId || '????').slice(-4).toUpperCase()),
           level: playerLevelOf(p.totalEarned),
           totalEarned: Math.floor(p.totalEarned),
+          totalTaps: Math.floor(p.totalTaps || 0),
           gold: Math.floor(p.gold || 0),
           gems: Math.floor(p.gems || 0),
           minerLevel: p.minerLevel || 1,
