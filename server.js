@@ -761,7 +761,7 @@ const MINER_CHECK_PRICES = { tap_su: 60, lanh_nghe: 450, doi_dao: 6000, may_khoa
 // Hai loại thợ chỉ có phía client (đóng gói trong extras __tmv): giá + gps hiện tại.
 const EXTRA_MINERS = {
   robot: { baseCost: 180000000, gps: 700 }, // giá 60tr -> 180tr (Kien chốt 2026-11-28); gps 1000 -> 700 (giảm earn top, Kien chốt 2026-11-27)
-  mo_tu_dong: { baseCost: 300000000, gps: 3500 }, // giá giảm 990tr -> 300tr theo yêu cầu Kien 2026-11-25; gps 5312.5 -> 3500 (giảm earn top, Kien chốt 2026-11-27)
+  mo_tu_dong: { baseCost: 300000000, gps: 1500 }, // giá giảm 990tr -> 300tr theo yêu cầu Kien 2026-11-25; gps 5312.5 -> 3500 (giảm earn top, Kien chốt 2026-11-27) -> 1500 (Kien chốt 2026-11-28: AI hoàn vốn quá nhanh so với Robot)
 };
 // Tổng giá hình học (không làm tròn từng con) để kiểm tra khả năng chi trả.
 function seriesCost(base, from, to) {
