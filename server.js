@@ -25,7 +25,7 @@ const START_GEMS = 1500;            // quà tân thủ
 const BASE_RATE = 1.9;              // Lv.1 = 1.9 + 0.1*1 = 2.0 vàng/giây (giảm từ 6.0 — cân bằng lại 2026-11-24)
 const RATE_PER_LEVEL = 0.1;
 const UPGRADE_COST_GEMS = 2000;     // nâng cấp thợ: phẳng 2.000 KC/cấp (giảm từ 5.000 ngày 2026-11-25 cho khớp kinh tế sau cân bằng; client hiển thị, trừ KC qua /api/save có kiểm tra)
-const EXCHANGE_RATE = 125;          // 125 vàng = 1 kim cương (một chiều vàng -> KC)
+const EXCHANGE_RATE = 150;          // 150 vàng = 1 kim cương (một chiều vàng -> KC; Kien tăng 125→150 ngày 28/11/2026 để KC khan hơn, ép xem ads)
 const WITHDRAW_RATE = 0.0005;       // 1 vàng = 0,0005 VNĐ
 const WITHDRAW_MIN_GOLD = 4000000;  // tối thiểu 4.000.000 vàng
 const SESSION_SECONDS = 4 * 3600;   // phiên đào 4 giờ
@@ -47,7 +47,7 @@ const AD_CHEST_COOLDOWN_MS = 60000;
 const AD_CHEST_DAILY_MAX = 15;  // trần rương vàng/ngày VN (vá 2026-11-27 — trước đây KHÔNG có trần ngày, chỉ cooldown 60s nên farm được)
 const AD_GEMS_REWARD = 120;     // KC miễn phí mỗi lượt xem ads — server cấp từ 2026-11-27 (trước đây client tự cộng qua save)
 const AD_GEMS_DAILY_MAX = 10;   // trần lượt nhận KC ads/ngày VN
-const MARKET_CHEST_CAP = 25000; // trần Rương vàng ở CHỢ (vá kinh tế 2026-11-28): 25.000/250 KC = tối đa 100 vàng/KC, THẤP hơn giá đổi 125 vàng/KC nên vòng lặp đổi vàng -> KC -> rương luôn LỖ; rương ADS giữ trần riêng 250.000
+const MARKET_CHEST_CAP = 25000; // trần Rương vàng ở CHỢ (vá kinh tế 2026-11-28): 25.000/250 KC = tối đa 100 vàng/KC, THẤP hơn giá đổi 150 vàng/KC nên vòng lặp đổi vàng -> KC -> rương luôn LỖ; rương ADS giữ trần riêng 250.000
 const SAVE_GEMS_DAILY_CAP = 2000; // trần KC/ngày cho phần KC client tự khai qua /api/save KHÔNG có vàng chống lưng (vá 2026-11-28; thừa cho điểm danh 10 + chuỗi 300 + nhiệm vụ vài trăm/ngày)
 /* ---- Cấp độ NGƯỜI CHƠI (khác cấp thợ mua bằng KC): theo TỔNG VÀNG ĐÀO tích
  * lũy (totalEarned — server đã kẹp chống gian lận), cấp 1..100 (nâng từ 50
@@ -1233,7 +1233,7 @@ const server = http.createServer(async (req, res) => {
       // SAVE_GEMS_DAILY_CAP cho phần KC KHÔNG có vàng chống lưng (điểm
       // danh +10, chuỗi 7 ngày +300, nhiệm vụ vài trăm/ngày đều dưới trần).
       // Phần KC có vàng chống lưng = client đổi vàng -> KC ngay trong UI
-      // (delta vàng âm tương ứng, tỉ lệ 125:1): đó là hoán đổi chứ không
+      // (delta vàng âm tương ứng, tỉ lệ 150:1): đó là hoán đổi chứ không
       // phải phát hành, và sau khi rương Chợ bị trần 100 vàng/KC thì hoán
       // đổi vòng tròn luôn lỗ — cho qua không trần ngày.
       if (!Number.isFinite(save._burstGems)) save._burstGems = 2000;
@@ -1247,7 +1247,7 @@ const server = http.createServer(async (req, res) => {
         let unbackedUsed = 0;
         if (delta > 0) {
           // Phần KC có VÀNG CHỐNG LƯNG: client vừa tiêu vàng thật trong cùng
-          // save này (đổi vàng -> KC trong UI, 125 vàng/KC), giới hạn bởi
+          // save này (đổi vàng -> KC trong UI, 150 vàng/KC), giới hạn bởi
           // số dư vàng server trước save — hoán đổi 1 chiều, không trần.
           const backed = goldDeltaReported < 0
             ? Math.floor(Math.min(-goldDeltaReported, goldBeforeSave) / EXCHANGE_RATE)
@@ -1313,7 +1313,7 @@ const server = http.createServer(async (req, res) => {
     /* ---- /api/exchange ĐÃ GỠ (vá kinh tế 2026-11-28) ----
      * Endpoint đổi vàng -> KC phía server từng tồn tại nhưng client chính
      * thức KHÔNG dùng (đổi trong UI đi qua /api/save và bị ngân sách KC
-     * ghìm). Để nó sống tạo vòng lặp in vàng: đổi 125 vàng -> 1 KC phía
+     * ghìm). Để nó sống tạo vòng lặp in vàng: đổi vàng -> KC phía
      * server (không trần) rồi mua Rương vàng ở Chợ mở ra tới 1.000 vàng/KC.
      * Gỡ hẳn endpoint; lời gọi tới đây rơi xuống 404 như route lạ. */
 
