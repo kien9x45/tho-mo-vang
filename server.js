@@ -410,16 +410,19 @@ async function settleIslandRaceIfNeeded(now) {
 
 // Thưởng MỐC mỗi 10 cấp — nhận 1 lần, server kiểm chứng cấp thật rồi mới trả.
 const LEVEL_MILESTONE_REWARDS = {
-  10: { gold: 25000, gems: 300 },
-  20: { gold: 75000, gems: 600 },
-  30: { gold: 200000, gems: 1000 },
-  40: { gold: 500000, gems: 1500 },
-  50: { gold: 1500000, gems: 3000 },
-  60: { gold: 3000000, gems: 4500 },
-  70: { gold: 5000000, gems: 6000 },
-  80: { gold: 8000000, gems: 8000 },
-  90: { gold: 12000000, gems: 10000 },
-  100: { gold: 25000000, gems: 15000 },
+  // Cắt 50% toàn bộ quà mốc cấp theo chốt của Kien 2026-11-28 (bản cũ tổng
+  // 55,3tr vàng + 49.900 KC là quá tay; bản này tổng 27,65tr + 24.950 KC).
+  // Chỉ áp cho mốc CHƯA nhận — ai đã nhận theo mức cũ giữ nguyên.
+  10: { gold: 12500, gems: 150 },
+  20: { gold: 37500, gems: 300 },
+  30: { gold: 100000, gems: 500 },
+  40: { gold: 250000, gems: 750 },
+  50: { gold: 750000, gems: 1500 },
+  60: { gold: 1500000, gems: 2250 },
+  70: { gold: 2500000, gems: 3000 },
+  80: { gold: 4000000, gems: 4000 },
+  90: { gold: 6000000, gems: 5000 },
+  100: { gold: 12500000, gems: 7500 },
 };
 const REFERRAL_MILESTONE_EARNED = 100000; // cửa sổ "tài khoản còn mới" + mốc tính BẠN CHĂM (tier 1)
 const REF_INSTANT_EARNED = 10000; // thưởng NGAY cho người mời chỉ trả khi bạn mới tự đào đủ chừng này (vá chống farm nick phụ 2026-11-28)
