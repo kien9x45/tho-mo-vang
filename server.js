@@ -130,8 +130,13 @@ function publicRaidLog(p, now) {
 function raidInfoFor(p, now) {
   const r = raidStateOf(p, now);
   return {
-    attacksLeft: Math.max(0, RAID_DAILY_MAX - r.used) + (r.bonus || 0),
-    attacksMax: RAID_DAILY_MAX,
+    // SỬA 2026-11-28 (Kien báo hiển thị sai lượt đột kích): công thức cũ
+    // max(0, 15 - used) + bonus ĐẾM TRÙNG bonus khi used vượt 15 — vd dùng
+    // 17 lượt với bonus 2 vẫn báo "còn 2" trong khi server đã chặn đánh.
+    // Đúng phải là max(0, 15 + bonus - used); attacksMax cũng cộng bonus
+    // để chip "Lượt hôm nay: x/y" không hiện kiểu 16/15.
+    attacksLeft: Math.max(0, RAID_DAILY_MAX + (r.bonus || 0) - r.used),
+    attacksMax: RAID_DAILY_MAX + (r.bonus || 0),
     shieldUntil: r.shieldUntil || 0,
     shieldActive: (r.shieldUntil || 0) > now,
     log: publicRaidLog(p, now),
